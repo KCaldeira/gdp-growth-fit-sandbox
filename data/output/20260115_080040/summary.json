@@ -1,0 +1,12 @@
+{
+  "n_observations": 8479,
+  "n_countries": 170,
+  "n_years": 62,
+  "n_parameters": 579,
+  "r_squared": 0.2981462494080733,
+  "rmse": 0.05114391657394713,
+  "aic": -25199.66901560343,
+  "bic": -21127.457988761715,
+  "n_iterations": 2,
+  "converged": true
+}
