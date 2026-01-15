@@ -28,12 +28,6 @@ def main():
         help="Output directory (default: timestamped subdirectory of data/output)"
     )
     parser.add_argument(
-        "--n-grid",
-        type=int,
-        default=20,
-        help="Number of grid points for initial alpha search"
-    )
-    parser.add_argument(
         "--quiet", "-q",
         action="store_true",
         help="Suppress progress output"
@@ -51,7 +45,6 @@ def main():
     print("\nFitting model...")
     result = fit_model(
         data,
-        n_grid=args.n_grid,
         verbose=not args.quiet,
     )
 

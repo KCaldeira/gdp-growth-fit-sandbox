@@ -51,13 +51,32 @@ Parameters: `k[t]` for each year t (with k[first_year] = 0 for identifiability)
 
 Uses **profile likelihood optimization** to handle the non-linear structure:
 
-1. **Grid search** over alpha [0.01, 0.99] to understand the objective landscape
+1. **Brent's method** searches for optimal alpha in [0.01, 0.99]
 2. For each candidate alpha, solve the **full linear least squares** problem for h, j, k
-3. **Brent's method** refines alpha to find the true optimum
+3. The objective function (sum of squared residuals) is evaluated exactly for each alpha
 
-This approach evaluates the true objective (sum of squared residuals) for each alpha candidate, ensuring reliable convergence. GDP0 is fixed to the population-weighted mean GDP for the most recent year.
+This approach evaluates the true objective for each alpha candidate, ensuring reliable convergence. GDP0 is fixed to the population-weighted mean GDP for the most recent year.
 
-Standard errors are computed via numerical Hessian of the log-likelihood.
+## Standard Error Estimation
+
+Standard errors are computed via the **numerical Hessian of the negative log-likelihood** at the converged solution:
+
+1. All estimated parameters (alpha, h0-h4, j's, k's) are packed into a single vector
+2. The Hessian matrix of the negative log-likelihood is computed using finite differences
+3. The covariance matrix is obtained by inverting the Hessian: `Cov = inv(Hessian)`
+4. Standard errors are the square roots of the diagonal: `SE[i] = sqrt(Cov[i,i])`
+
+**Key properties:**
+- **GDP0 is excluded** from the Hessian computation since it is a fixed known value, not an estimated parameter
+- The **full joint Hessian** is computed over all 578 estimated parameters (1 alpha + 5 h's + 510 j's + 62 k's)
+- Standard errors for each parameter **account for correlations with all other parameters**, including alpha
+- This means the uncertainty in h0-h4 reflects uncertainty in alpha (and vice versa)
+
+The negative log-likelihood (assuming Gaussian errors) is:
+```
+-log L = (n/2) * log(SSR/n) + constant
+```
+where SSR is the sum of squared residuals.
 
 ## Data
 
@@ -86,8 +105,8 @@ Results from each test run are saved to timestamped subdirectories in `./data/ou
 - `climate_response_vs_gdp.png` - Climate response scaling with GDP (with uncertainty)
 - `climate_response_surface.png` - h(T,P) response surface at GDP0
 - `residuals.csv` - Fitted values and residuals
-- `alpha_grid_search.csv` - Grid search results (alpha vs objective)
-- `alpha_grid_search.png` - Grid search visualization
+- `alpha_optimization.csv` - Optimization evaluations (alpha vs objective)
+- `alpha_optimization.png` - Optimization path visualization
 
 ## Installation
 
@@ -103,17 +122,16 @@ pip install -r requirements.txt
 # Run with default settings
 python scripts/run_fit.py
 
-# Custom options (finer grid search)
-python scripts/run_fit.py --n-grid 50
-
 # Specify output directory
 python scripts/run_fit.py --output data/output/my_test
+
+# Quiet mode (suppress progress output)
+python scripts/run_fit.py --quiet
 ```
 
 ### Command Line Options
 - `--input, -i`: Path to input CSV file (default: data/input/df_base_withPop.csv)
 - `--output, -o`: Output directory (default: timestamped subdirectory)
-- `--n-grid`: Number of grid points for initial alpha search (default: 20)
 - `--quiet, -q`: Suppress progress output
 
 ## Project Structure

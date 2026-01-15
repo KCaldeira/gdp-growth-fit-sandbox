@@ -177,18 +177,17 @@ def objective_for_alpha(alpha: float, GDP0: float, data: FittingData) -> float:
     return np.sum(residuals**2)
 
 
-def fit_model(data: FittingData, n_grid: int = 20, verbose: bool = True) -> FitResult:
+def fit_model(data: FittingData, verbose: bool = True) -> FitResult:
     """Fit the full model by optimizing alpha with linear subproblem solved exactly.
 
     For each candidate alpha, we solve the full linear least squares problem
     for h, j, k parameters. This gives the true objective as a function of alpha,
-    which we then minimize using scipy's bounded optimizer.
+    which we then minimize using scipy's bounded optimizer (Brent's method).
 
     GDP0 is fixed to the population-weighted mean GDP from the data.
 
     Args:
         data: FittingData object
-        n_grid: Number of grid points for initial search (default: 20)
         verbose: Print progress
 
     Returns:
@@ -202,69 +201,47 @@ def fit_model(data: FittingData, n_grid: int = 20, verbose: bool = True) -> FitR
         print(f"  N={data.n_obs}, countries={data.n_countries}, years={data.n_years}")
         print(f"  GDP0 (fixed) = {GDP0:.2f} (pop-weighted mean GDP, {data.gdp0_reference_year})")
 
-    # Step 1: Grid search to understand the landscape
+    # Optimize alpha using Brent's method on [0.01, 0.99]
     if verbose:
-        print(f"\n  Step 1: Grid search over alpha ({n_grid} points)...")
+        print(f"\n  Optimizing alpha with Brent's method...")
 
-    alpha_grid = np.linspace(0.01, 0.99, n_grid)
-    objectives = []
-
-    for test_alpha in alpha_grid:
-        obj = objective_for_alpha(test_alpha, GDP0, data)
-        objectives.append(obj)
-        if verbose:
-            print(f"    alpha={test_alpha:.3f}: obj={obj:.6f}")
-
-    grid_search_alphas = alpha_grid
-    grid_search_objectives = np.array(objectives)
-
-    # Find best from grid
-    best_grid_idx = np.argmin(objectives)
-    best_grid_alpha = alpha_grid[best_grid_idx]
-    best_grid_obj = objectives[best_grid_idx]
-
-    if verbose:
-        print(f"  Grid search best: alpha={best_grid_alpha:.3f}, obj={best_grid_obj:.6f}")
-
-    # Step 2: Refine with bounded optimization
-    if verbose:
-        print(f"\n  Step 2: Refining with Brent's method...")
-
-    # Track function evaluations
+    # Track all function evaluations
     eval_history = []
 
     def tracked_objective(alpha):
         obj = objective_for_alpha(alpha, GDP0, data)
         eval_history.append((alpha, obj))
         if verbose:
-            print(f"    alpha={alpha:.6f}: obj={obj:.6f}")
+            print(f"    alpha={alpha:.8f}: obj={obj:.8f}")
         return obj
 
     result = optimize.minimize_scalar(
         tracked_objective,
         bounds=(0.01, 0.99),
         method='bounded',
-        options={'xatol': 1e-6}
+        options={'xatol': 1e-8}
     )
 
     alpha = result.x
     final_obj = result.fun
 
     if verbose:
-        print(f"  Optimization converged: alpha={alpha:.6f}, obj={final_obj:.6f}")
+        print(f"  Optimization converged: alpha={alpha:.8f}, obj={final_obj:.8f}")
         print(f"  Function evaluations: {len(eval_history)}")
 
-    # Step 3: Get final parameters at optimal alpha
+    # Get final parameters at optimal alpha
     if verbose:
-        print(f"\n  Step 3: Computing final parameters...")
-
-    g_values = g_func(data.pcGDP, GDP0, alpha)
-    h_params, j0, j1, j2, k = solve_linear_subproblem(data, g_values)
+        print(f"\n  Computing final parameters...")
 
     converged = result.success
     objective_history = [obj for _, obj in eval_history]
 
-    # Final solve for linear parameters with converged g
+    # Sort evaluations by alpha for output (shows the search path)
+    eval_history_sorted = sorted(eval_history, key=lambda x: x[0])
+    grid_search_alphas = np.array([a for a, _ in eval_history_sorted])
+    grid_search_objectives = np.array([obj for _, obj in eval_history_sorted])
+
+    # Final solve for linear parameters with converged alpha
     g_values = g_func(data.pcGDP, GDP0, alpha)
     h_params, j0, j1, j2, k = solve_linear_subproblem(data, g_values)
 
@@ -308,7 +285,7 @@ def fit_model(data: FittingData, n_grid: int = 20, verbose: bool = True) -> FitR
         rmse=rmse,
         aic=aic,
         bic=bic,
-        n_iterations=n_grid + len(eval_history),  # Grid search + Brent evaluations
+        n_iterations=len(eval_history),  # Number of objective function evaluations
         converged=converged,
         objective_history=objective_history,
         grid_search_alphas=grid_search_alphas,
@@ -321,12 +298,16 @@ def compute_standard_errors(data: FittingData, params: ModelParams) -> ModelPara
 
     Uses finite differences to approximate the Hessian of the negative
     log-likelihood, then inverts to get the covariance matrix.
+
+    GDP0 is treated as a known constant (not estimated), so it is excluded
+    from the Hessian calculation.
     """
-    # Pack all parameters into a single vector
-    param_vec = pack_params(params, data.n_countries, data.n_years)
+    # Pack estimated parameters (excluding GDP0 which is fixed)
+    param_vec = pack_params_for_hessian(params, data.n_countries, data.n_years)
+    GDP0 = params.GDP0  # Fixed value
 
     def neg_log_likelihood(p):
-        params_temp = unpack_params(p, data.n_countries, data.n_years)
+        params_temp = unpack_params_for_hessian(p, GDP0, data.n_countries, data.n_years)
         pred = predict_from_data(data, params_temp)
         residuals = data.growth_pcGDP - pred
         ss_res = np.sum(residuals**2)
@@ -341,7 +322,7 @@ def compute_standard_errors(data: FittingData, params: ModelParams) -> ModelPara
         cov = np.linalg.inv(hessian)
         se = np.sqrt(np.maximum(np.diag(cov), 0))
 
-        # Unpack standard errors
+        # Unpack standard errors (GDP0 has no SE since it's fixed)
         params = unpack_standard_errors(params, se, data.n_countries, data.n_years)
     except (np.linalg.LinAlgError, ValueError) as e:
         print(f"Warning: Could not compute standard errors: {e}")
@@ -349,10 +330,13 @@ def compute_standard_errors(data: FittingData, params: ModelParams) -> ModelPara
     return params
 
 
-def pack_params(params: ModelParams, n_countries: int, n_years: int) -> np.ndarray:
-    """Pack model parameters into a single vector."""
+def pack_params_for_hessian(params: ModelParams, n_countries: int, n_years: int) -> np.ndarray:
+    """Pack estimated parameters into a vector for Hessian computation.
+
+    Excludes GDP0 since it is treated as a known constant.
+    """
     return np.concatenate([
-        [params.GDP0, params.alpha],
+        [params.alpha],
         [params.h0, params.h1, params.h2, params.h3, params.h4],
         params.j0,
         params.j1,
@@ -361,11 +345,11 @@ def pack_params(params: ModelParams, n_countries: int, n_years: int) -> np.ndarr
     ])
 
 
-def unpack_params(vec: np.ndarray, n_countries: int, n_years: int) -> ModelParams:
-    """Unpack parameter vector into ModelParams."""
+def unpack_params_for_hessian(vec: np.ndarray, GDP0: float,
+                               n_countries: int, n_years: int) -> ModelParams:
+    """Unpack parameter vector into ModelParams, with GDP0 provided separately."""
     idx = 0
 
-    GDP0 = vec[idx]; idx += 1
     alpha = vec[idx]; idx += 1
 
     h0 = vec[idx]; idx += 1
@@ -389,10 +373,13 @@ def unpack_params(vec: np.ndarray, n_countries: int, n_years: int) -> ModelParam
 
 def unpack_standard_errors(params: ModelParams, se: np.ndarray,
                            n_countries: int, n_years: int) -> ModelParams:
-    """Add standard errors to ModelParams."""
+    """Add standard errors to ModelParams.
+
+    GDP0 has no standard error since it is a fixed known value.
+    """
     idx = 0
 
-    params.se_GDP0 = se[idx]; idx += 1
+    params.se_GDP0 = None  # GDP0 is fixed, no SE
     params.se_alpha = se[idx]; idx += 1
 
     params.se_h0 = se[idx]; idx += 1

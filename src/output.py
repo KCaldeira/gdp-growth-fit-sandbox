@@ -122,10 +122,7 @@ def save_summary(result: FitResult, data: FittingData, output_dir: Path) -> None
         f.write("Global Parameters:\n")
         f.write("-" * 40 + "\n")
         params = result.params
-        f.write(f"  GDP0:  {params.GDP0:12.4f}")
-        if params.se_GDP0:
-            f.write(f"  (SE: {params.se_GDP0:.4f})")
-        f.write("\n")
+        f.write(f"  GDP0:  {params.GDP0:12.4f}  (fixed)\n")
         f.write(f"  alpha: {params.alpha:12.6f}")
         if params.se_alpha:
             f.write(f"  (SE: {params.se_alpha:.6f})")
@@ -383,36 +380,36 @@ def save_climate_response_plots(result: FitResult, data: FittingData,
     plt.close()
 
 
-def save_grid_search_results(result: FitResult, data: FittingData,
-                             output_dir: Path) -> None:
-    """Save grid search results (plot and CSV) if available."""
+def save_optimization_results(result: FitResult, data: FittingData,
+                              output_dir: Path) -> None:
+    """Save alpha optimization results (plot and CSV) if available."""
     if result.grid_search_alphas is None:
         return
 
-    # Save CSV
+    # Save CSV (sorted by alpha)
     df = pd.DataFrame({
         'alpha': result.grid_search_alphas,
         'objective': result.grid_search_objectives,
     })
-    df.to_csv(output_dir / "alpha_grid_search.csv", index=False)
+    df.to_csv(output_dir / "alpha_optimization.csv", index=False)
 
     # Save plot
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.plot(result.grid_search_alphas, result.grid_search_objectives,
-            'b-', linewidth=2, marker='o', markersize=4)
+            'b-', linewidth=2, marker='o', markersize=6)
     ax.set_xlabel('Alpha')
     ax.set_ylabel('Objective (Sum of Squared Residuals)')
-    ax.set_title(f'Objective Function vs Alpha\n(GDP0 = {data.pop_weighted_mean_gdp:.0f}, {data.gdp0_reference_year})')
+    ax.set_title(f'Alpha Optimization Path (Brent\'s Method)\n(GDP0 = {data.pop_weighted_mean_gdp:.0f}, {data.gdp0_reference_year})')
     ax.grid(True, alpha=0.3)
 
     # Mark minimum
     min_idx = np.argmin(result.grid_search_objectives)
     ax.axvline(x=result.grid_search_alphas[min_idx], color='red', linestyle='--',
-               label=f'Min at alpha={result.grid_search_alphas[min_idx]:.2f}')
+               label=f'Optimum: alpha={result.grid_search_alphas[min_idx]:.4f}')
     ax.legend()
 
     plt.tight_layout()
-    plt.savefig(output_dir / "alpha_grid_search.png", dpi=150)
+    plt.savefig(output_dir / "alpha_optimization.png", dpi=150)
     plt.close()
 
 
@@ -438,7 +435,7 @@ def save_all_outputs(result: FitResult, data: FittingData,
     save_diagnostic_plots(result, data, output_dir)
     save_residuals(result, data, output_dir)
     save_climate_response_plots(result, data, output_dir)
-    save_grid_search_results(result, data, output_dir)
+    save_optimization_results(result, data, output_dir)
 
     print("  - global_params.json")
     print("  - country_params.csv")
@@ -451,8 +448,8 @@ def save_all_outputs(result: FitResult, data: FittingData,
     print("  - climate_response_vs_gdp.png")
     print("  - climate_response_surface.png")
     if result.grid_search_alphas is not None:
-        print("  - alpha_grid_search.png")
-        print("  - alpha_grid_search.csv")
+        print("  - alpha_optimization.png")
+        print("  - alpha_optimization.csv")
 
     return output_dir
 
