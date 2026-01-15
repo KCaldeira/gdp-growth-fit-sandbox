@@ -51,9 +51,10 @@ Parameters: `k[t]` for each year t (with k[first_year] = 0 for identifiability)
 
 Uses **alternating estimation** to handle the non-linear structure:
 
-1. Fix `alpha` → solve linear least squares for h, j, k parameters
-2. Fix h, j, k → optimize over `alpha` using bounded scalar optimization
-3. Iterate until convergence
+1. **Grid search** over alpha [0.01, 0.99] to find best starting point
+2. Fix `alpha` → solve linear least squares for h, j, k parameters
+3. Fix h, j, k → optimize over `alpha` using bounded scalar optimization
+4. Iterate steps 2-3 until convergence
 
 Standard errors are computed via numerical Hessian of the log-likelihood.
 
@@ -84,6 +85,8 @@ Results from each test run are saved to timestamped subdirectories in `./data/ou
 - `climate_response_vs_gdp.png` - Climate response scaling with GDP (with uncertainty)
 - `climate_response_surface.png` - h(T,P) response surface at GDP0
 - `residuals.csv` - Fitted values and residuals
+- `alpha_grid_search.csv` - Grid search results (alpha vs objective)
+- `alpha_grid_search.png` - Grid search visualization
 
 ## Installation
 
@@ -111,7 +114,7 @@ python scripts/run_fit.py --output data/output/my_test
 - `--output, -o`: Output directory (default: timestamped subdirectory)
 - `--max-iter`: Maximum iterations for alternating estimation (default: 100)
 - `--tol`: Convergence tolerance (default: 1e-6)
-- `--alpha-init`: Initial value for alpha parameter (default: 0.1)
+- `--alpha-init`: Initial value for alpha (default: grid search to find best)
 - `--quiet, -q`: Suppress progress output
 
 ## Project Structure

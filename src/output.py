@@ -132,25 +132,25 @@ def save_summary(result: FitResult, data: FittingData, output_dir: Path) -> None
         f.write("\n\n")
 
         f.write("Climate Response (h):\n")
-        f.write(f"  h0: {params.h0:12.6f}")
+        f.write(f"  h0: {params.h0:12.4e}")
         if params.se_h0:
-            f.write(f"  (SE: {params.se_h0:.6f})")
+            f.write(f"  (SE: {params.se_h0:.4e})")
         f.write("\n")
-        f.write(f"  h1: {params.h1:12.6f}")
+        f.write(f"  h1: {params.h1:12.4e}")
         if params.se_h1:
-            f.write(f"  (SE: {params.se_h1:.6f})")
+            f.write(f"  (SE: {params.se_h1:.4e})")
         f.write("\n")
-        f.write(f"  h2: {params.h2:12.6f}")
+        f.write(f"  h2: {params.h2:12.4e}")
         if params.se_h2:
-            f.write(f"  (SE: {params.se_h2:.6f})")
+            f.write(f"  (SE: {params.se_h2:.4e})")
         f.write("\n")
-        f.write(f"  h3: {params.h3:12.6f}")
+        f.write(f"  h3: {params.h3:12.4e}")
         if params.se_h3:
-            f.write(f"  (SE: {params.se_h3:.6f})")
+            f.write(f"  (SE: {params.se_h3:.4e})")
         f.write("\n")
-        f.write(f"  h4: {params.h4:12.6f}")
+        f.write(f"  h4: {params.h4:12.4e}")
         if params.se_h4:
-            f.write(f"  (SE: {params.se_h4:.6f})")
+            f.write(f"  (SE: {params.se_h4:.4e})")
         f.write("\n")
 
 
@@ -383,6 +383,39 @@ def save_climate_response_plots(result: FitResult, data: FittingData,
     plt.close()
 
 
+def save_grid_search_results(result: FitResult, data: FittingData,
+                             output_dir: Path) -> None:
+    """Save grid search results (plot and CSV) if available."""
+    if result.grid_search_alphas is None:
+        return
+
+    # Save CSV
+    df = pd.DataFrame({
+        'alpha': result.grid_search_alphas,
+        'objective': result.grid_search_objectives,
+    })
+    df.to_csv(output_dir / "alpha_grid_search.csv", index=False)
+
+    # Save plot
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(result.grid_search_alphas, result.grid_search_objectives,
+            'b-', linewidth=2, marker='o', markersize=4)
+    ax.set_xlabel('Alpha')
+    ax.set_ylabel('Objective (Sum of Squared Residuals)')
+    ax.set_title(f'Objective Function vs Alpha\n(GDP0 = {data.pop_weighted_mean_gdp:.0f}, {data.gdp0_reference_year})')
+    ax.grid(True, alpha=0.3)
+
+    # Mark minimum
+    min_idx = np.argmin(result.grid_search_objectives)
+    ax.axvline(x=result.grid_search_alphas[min_idx], color='red', linestyle='--',
+               label=f'Min at alpha={result.grid_search_alphas[min_idx]:.2f}')
+    ax.legend()
+
+    plt.tight_layout()
+    plt.savefig(output_dir / "alpha_grid_search.png", dpi=150)
+    plt.close()
+
+
 def save_all_outputs(result: FitResult, data: FittingData,
                      output_dir: Optional[Path] = None) -> Path:
     """Save all outputs to a timestamped directory.
@@ -405,6 +438,7 @@ def save_all_outputs(result: FitResult, data: FittingData,
     save_diagnostic_plots(result, data, output_dir)
     save_residuals(result, data, output_dir)
     save_climate_response_plots(result, data, output_dir)
+    save_grid_search_results(result, data, output_dir)
 
     print("  - global_params.json")
     print("  - country_params.csv")
@@ -416,6 +450,9 @@ def save_all_outputs(result: FitResult, data: FittingData,
     print("  - residuals.csv")
     print("  - climate_response_vs_gdp.png")
     print("  - climate_response_surface.png")
+    if result.grid_search_alphas is not None:
+        print("  - alpha_grid_search.png")
+        print("  - alpha_grid_search.csv")
 
     return output_dir
 

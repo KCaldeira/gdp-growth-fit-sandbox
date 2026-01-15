@@ -42,8 +42,8 @@ def main():
     parser.add_argument(
         "--alpha-init",
         type=float,
-        default=0.1,
-        help="Initial value for alpha parameter (GDP0 is fixed to pop-weighted mean GDP)"
+        default=None,
+        help="Initial value for alpha (default: grid search to find best starting point)"
     )
     parser.add_argument(
         "--quiet", "-q",

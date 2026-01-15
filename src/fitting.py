@@ -30,6 +30,9 @@ class FitResult:
     n_iterations: int
     converged: bool
     objective_history: list
+    # Grid search results (if performed)
+    grid_search_alphas: Optional[np.ndarray] = None
+    grid_search_objectives: Optional[np.ndarray] = None
 
 
 def build_linear_design_matrix(data: FittingData, g_values: np.ndarray) -> np.ndarray:
@@ -96,7 +99,9 @@ def solve_linear_subproblem(data: FittingData, g_values: np.ndarray
     y = data.growth_pcGDP
 
     # Solve least squares: X @ beta = y
-    beta, residuals, rank, s = np.linalg.lstsq(X, y, rcond=None)
+    # Use scipy.linalg.lstsq which is more robust than numpy
+    from scipy import linalg
+    beta, residuals, rank, s = linalg.lstsq(X, y, cond=None, lapack_driver='gelsy')
 
     # Extract parameters
     n_countries = data.n_countries
@@ -145,8 +150,9 @@ def objective_alpha_only(alpha: float, GDP0: float, data: FittingData,
     return np.sum(residuals**2)
 
 
-def fit_model(data: FittingData, max_iter: int = 100, tol: float = 1e-6,
-              alpha_init: float = 0.1, verbose: bool = True) -> FitResult:
+def fit_model(data: FittingData, max_iter: int = 100, tol: float = 1e-8,
+              alpha_tol: float = 1e-6, min_iter: int = 5,
+              alpha_init: float = None, verbose: bool = True) -> FitResult:
     """Fit the full model using alternating estimation.
 
     GDP0 is fixed to the population-weighted mean GDP from the data.
@@ -155,7 +161,9 @@ def fit_model(data: FittingData, max_iter: int = 100, tol: float = 1e-6,
         data: FittingData object
         max_iter: Maximum number of alternating iterations
         tol: Convergence tolerance (relative change in objective)
-        alpha_init: Initial value for alpha
+        alpha_tol: Convergence tolerance for alpha parameter change
+        min_iter: Minimum iterations before checking convergence
+        alpha_init: Initial value for alpha (if None, uses grid search)
         verbose: Print progress
 
     Returns:
@@ -163,13 +171,50 @@ def fit_model(data: FittingData, max_iter: int = 100, tol: float = 1e-6,
     """
     # GDP0 is fixed to population-weighted mean GDP
     GDP0 = data.pop_weighted_mean_gdp
-    alpha = alpha_init
-    objective_history = []
 
     if verbose:
         print(f"Starting alternating estimation...")
         print(f"  N={data.n_obs}, countries={data.n_countries}, years={data.n_years}")
         print(f"  GDP0 (fixed) = {GDP0:.2f} (pop-weighted mean GDP, {data.gdp0_reference_year})")
+
+    # If no alpha_init provided, do grid search to find best starting point
+    grid_search_alphas = None
+    grid_search_objectives = None
+
+    if alpha_init is None:
+        if verbose:
+            print(f"  Grid search for initial alpha...")
+        alpha_grid = np.linspace(0.01, 0.99, 20)
+        objectives = []
+        best_obj = float('inf')
+        best_alpha = 0.1
+
+        for test_alpha in alpha_grid:
+            g_values = g_func(data.pcGDP, GDP0, test_alpha)
+            h_params, j0, j1, j2, k = solve_linear_subproblem(data, g_values)
+            obj = objective_alpha_only(test_alpha, GDP0, data, h_params, j0, j1, j2, k)
+            objectives.append(obj)
+            if verbose:
+                print(f"    alpha={test_alpha:.2f}: obj={obj:.4f}")
+            if obj < best_obj:
+                best_obj = obj
+                best_alpha = test_alpha
+
+        # Save grid search results
+        grid_search_alphas = alpha_grid
+        grid_search_objectives = np.array(objectives)
+
+        alpha = best_alpha
+        if verbose:
+            print(f"  Best initial alpha: {alpha:.2f} (obj={best_obj:.4f})")
+    else:
+        alpha = alpha_init
+
+    objective_history = []
+    alpha_history = [alpha]
+
+    if verbose:
+        print(f"  Convergence: tol={tol:.0e}, alpha_tol={alpha_tol:.0e}, min_iter={min_iter}")
 
     for iteration in range(max_iter):
         # Step 1: Fix g, solve for h, j, k
@@ -187,23 +232,29 @@ def fit_model(data: FittingData, max_iter: int = 100, tol: float = 1e-6,
         alpha_new = result.x
         obj = result.fun
         objective_history.append(obj)
+        alpha_history.append(alpha_new)
 
-        # Check convergence
+        # Compute changes
+        alpha_change = abs(alpha_new - alpha)
         if iteration > 0:
             rel_change = abs(objective_history[-1] - objective_history[-2]) / (
                 abs(objective_history[-2]) + 1e-10
             )
-            if verbose and iteration % 10 == 0:
-                print(f"  Iter {iteration}: obj={obj:.4f}, "
-                      f"alpha={alpha_new:.4f}, rel_change={rel_change:.2e}")
-            if rel_change < tol:
+        else:
+            rel_change = float('inf')
+
+        # Print progress
+        if verbose:
+            print(f"  Iter {iteration}: obj={obj:.6f}, alpha={alpha_new:.6f}, "
+                  f"d_alpha={alpha_change:.2e}, rel_change={rel_change:.2e}")
+
+        # Check convergence (only after min_iter)
+        if iteration >= min_iter:
+            if rel_change < tol and alpha_change < alpha_tol:
                 if verbose:
                     print(f"  Converged at iteration {iteration}")
                 alpha = alpha_new
                 break
-        else:
-            if verbose:
-                print(f"  Iter {iteration}: obj={obj:.4f}, alpha={alpha_new:.4f}")
 
         alpha = alpha_new
 
@@ -256,6 +307,8 @@ def fit_model(data: FittingData, max_iter: int = 100, tol: float = 1e-6,
         n_iterations=iteration + 1,
         converged=converged,
         objective_history=objective_history,
+        grid_search_alphas=grid_search_alphas,
+        grid_search_objectives=grid_search_objectives,
     )
 
 
