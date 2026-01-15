@@ -169,7 +169,7 @@ def fit_model(data: FittingData, max_iter: int = 100, tol: float = 1e-6,
     if verbose:
         print(f"Starting alternating estimation...")
         print(f"  N={data.n_obs}, countries={data.n_countries}, years={data.n_years}")
-        print(f"  GDP0 (fixed) = {GDP0:.2f} (population-weighted mean GDP)")
+        print(f"  GDP0 (fixed) = {GDP0:.2f} (pop-weighted mean GDP, {data.gdp0_reference_year})")
 
     for iteration in range(max_iter):
         # Step 1: Fix g, solve for h, j, k

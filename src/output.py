@@ -245,6 +245,144 @@ def save_residuals(result: FitResult, data: FittingData,
     df.to_csv(output_dir / "residuals.csv", index=False)
 
 
+def save_climate_response_plots(result: FitResult, data: FittingData,
+                                output_dir: Path) -> None:
+    """Generate climate response plots with uncertainty.
+
+    Creates two plots:
+    1. Climate response scaling with GDP - shows how g(GDP)*h scales with GDP
+    2. Climate response at mean GDP - shows h(T,P) response surface
+    """
+    params = result.params
+    GDP0 = params.GDP0
+
+    # =========================================================================
+    # Plot 1: Climate response scaling with GDP
+    # Shows g(GDP) * h for different GDP levels, with uncertainty from alpha
+    # =========================================================================
+
+    # Use median temperature and precipitation for the h value
+    T_median = np.median(data.temp)
+    P_median = np.median(data.precp)
+    h_at_median = params.h0 + params.h1 * T_median + params.h2 * T_median**2 + \
+                  params.h3 * P_median + params.h4 * P_median**2
+
+    # GDP range from data
+    gdp_min, gdp_max = data.pcGDP.min(), data.pcGDP.max()
+    gdp_range = np.logspace(np.log10(gdp_min), np.log10(gdp_max), 100)
+
+    # g(GDP) for the estimated alpha
+    g_values = (gdp_range / GDP0) ** (-params.alpha)
+    climate_response = g_values * h_at_median
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Main line
+    ax.plot(gdp_range, climate_response, 'b-', linewidth=2,
+            label=f'$\\alpha$ = {params.alpha:.4f}')
+
+    # Uncertainty bands from alpha SE
+    if params.se_alpha is not None:
+        alpha_lo = max(0, params.alpha - 1.96 * params.se_alpha)
+        alpha_hi = min(1, params.alpha + 1.96 * params.se_alpha)
+
+        g_lo = (gdp_range / GDP0) ** (-alpha_lo)
+        g_hi = (gdp_range / GDP0) ** (-alpha_hi)
+
+        response_lo = g_lo * h_at_median
+        response_hi = g_hi * h_at_median
+
+        # Fill between (handle case where lo and hi might swap)
+        ax.fill_between(gdp_range,
+                        np.minimum(response_lo, response_hi),
+                        np.maximum(response_lo, response_hi),
+                        alpha=0.3, color='blue',
+                        label=f'95% CI ($\\alpha$ = {alpha_lo:.4f} to {alpha_hi:.4f})')
+
+    ax.axhline(y=h_at_median, color='gray', linestyle='--', linewidth=1,
+               label=f'h at GDP0 (={h_at_median:.4f})')
+    ax.axvline(x=GDP0, color='red', linestyle=':', linewidth=1,
+               label=f'GDP0 = {GDP0:.0f}')
+
+    ax.set_xscale('log')
+    ax.set_xlabel('Per Capita GDP')
+    ax.set_ylabel('Climate Response: g(GDP) × h(T,P)')
+    ax.set_title(f'Climate Response Scaling with GDP\n(at T={T_median:.1f}°C, P={P_median:.2f})')
+    ax.legend(loc='best')
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_dir / "climate_response_vs_gdp.png", dpi=150)
+    plt.close()
+
+    # =========================================================================
+    # Plot 2: Climate response at mean GDP (h(T,P) surface)
+    # At GDP = GDP0, g(GDP0/GDP0) = 1, so response is just h(T,P)
+    # =========================================================================
+
+    # Temperature range from data
+    T_min, T_max = data.temp.min(), data.temp.max()
+    T_range = np.linspace(T_min, T_max, 50)
+
+    # Compute h(T) at median precipitation
+    h_values = params.h0 + params.h1 * T_range + params.h2 * T_range**2 + \
+               params.h3 * P_median + params.h4 * P_median**2
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Left plot: h(T) at median P with uncertainty
+    ax = axes[0]
+    ax.plot(T_range, h_values, 'b-', linewidth=2, label='Estimate')
+
+    # Uncertainty propagation for h(T) = h0 + h1*T + h2*T^2 + h3*P + h4*P^2
+    # Variance of h = sum of (partial derivative * SE)^2 assuming independence
+    if params.se_h0 is not None:
+        var_h = (params.se_h0**2 +
+                 (T_range * params.se_h1)**2 +
+                 (T_range**2 * params.se_h2)**2 +
+                 (P_median * params.se_h3)**2 +
+                 (P_median**2 * params.se_h4)**2)
+        se_h = np.sqrt(var_h)
+
+        ax.fill_between(T_range, h_values - 1.96 * se_h, h_values + 1.96 * se_h,
+                        alpha=0.3, color='blue', label='95% CI')
+
+    ax.axhline(y=0, color='gray', linestyle='--', linewidth=1)
+    ax.set_xlabel('Temperature (°C)')
+    ax.set_ylabel('Climate Response h(T,P)')
+    ax.set_title(f'Temperature Response at GDP0\n(P = {P_median:.2f})')
+    ax.legend(loc='best')
+    ax.grid(True, alpha=0.3)
+
+    # Right plot: 2D contour of h(T,P)
+    ax = axes[1]
+    P_min, P_max = data.precp.min(), data.precp.max()
+    P_range = np.linspace(P_min, P_max, 50)
+
+    T_grid, P_grid = np.meshgrid(T_range, P_range)
+    h_grid = params.h0 + params.h1 * T_grid + params.h2 * T_grid**2 + \
+             params.h3 * P_grid + params.h4 * P_grid**2
+
+    contour = ax.contourf(T_grid, P_grid, h_grid, levels=20, cmap='RdBu_r')
+    plt.colorbar(contour, ax=ax, label='h(T,P)')
+
+    # Mark the optimal temperature (where dh/dT = 0)
+    if params.h2 != 0:
+        T_opt = -params.h1 / (2 * params.h2)
+        if T_min <= T_opt <= T_max:
+            ax.axvline(x=T_opt, color='black', linestyle='--', linewidth=1,
+                       label=f'Optimal T = {T_opt:.1f}°C')
+            ax.legend(loc='best')
+
+    ax.set_xlabel('Temperature (°C)')
+    ax.set_ylabel('Log Precipitation (P)')
+    ax.set_title('Climate Response Surface h(T,P) at GDP0')
+
+    plt.tight_layout()
+    plt.savefig(output_dir / "climate_response_surface.png", dpi=150)
+    plt.close()
+
+
 def save_all_outputs(result: FitResult, data: FittingData,
                      output_dir: Optional[Path] = None) -> Path:
     """Save all outputs to a timestamped directory.
@@ -266,6 +404,7 @@ def save_all_outputs(result: FitResult, data: FittingData,
     save_summary(result, data, output_dir)
     save_diagnostic_plots(result, data, output_dir)
     save_residuals(result, data, output_dir)
+    save_climate_response_plots(result, data, output_dir)
 
     print("  - global_params.json")
     print("  - country_params.csv")
@@ -275,6 +414,8 @@ def save_all_outputs(result: FitResult, data: FittingData,
     print("  - convergence.png")
     print("  - year_effects.png")
     print("  - residuals.csv")
+    print("  - climate_response_vs_gdp.png")
+    print("  - climate_response_surface.png")
 
     return output_dir
 
