@@ -49,12 +49,13 @@ Parameters: `k[t]` for each year t (with k[first_year] = 0 for identifiability)
 
 ## Fitting Algorithm
 
-Uses **alternating estimation** to handle the non-linear structure:
+Uses **profile likelihood optimization** to handle the non-linear structure:
 
-1. **Grid search** over alpha [0.01, 0.99] to find best starting point
-2. Fix `alpha` → solve linear least squares for h, j, k parameters
-3. Fix h, j, k → optimize over `alpha` using bounded scalar optimization
-4. Iterate steps 2-3 until convergence
+1. **Grid search** over alpha [0.01, 0.99] to understand the objective landscape
+2. For each candidate alpha, solve the **full linear least squares** problem for h, j, k
+3. **Brent's method** refines alpha to find the true optimum
+
+This approach evaluates the true objective (sum of squared residuals) for each alpha candidate, ensuring reliable convergence. GDP0 is fixed to the population-weighted mean GDP for the most recent year.
 
 Standard errors are computed via numerical Hessian of the log-likelihood.
 
@@ -102,8 +103,8 @@ pip install -r requirements.txt
 # Run with default settings
 python scripts/run_fit.py
 
-# Custom options
-python scripts/run_fit.py --max-iter 100 --alpha-init 0.5
+# Custom options (finer grid search)
+python scripts/run_fit.py --n-grid 50
 
 # Specify output directory
 python scripts/run_fit.py --output data/output/my_test
@@ -112,9 +113,7 @@ python scripts/run_fit.py --output data/output/my_test
 ### Command Line Options
 - `--input, -i`: Path to input CSV file (default: data/input/df_base_withPop.csv)
 - `--output, -o`: Output directory (default: timestamped subdirectory)
-- `--max-iter`: Maximum iterations for alternating estimation (default: 100)
-- `--tol`: Convergence tolerance (default: 1e-6)
-- `--alpha-init`: Initial value for alpha (default: grid search to find best)
+- `--n-grid`: Number of grid points for initial alpha search (default: 20)
 - `--quiet, -q`: Suppress progress output
 
 ## Project Structure
@@ -128,7 +127,7 @@ gdp-growth-fit-sandbox/
 │   ├── __init__.py
 │   ├── data_loader.py      # Load CSV, create mappings
 │   ├── model.py            # Model component functions
-│   ├── fitting.py          # Alternating estimation algorithm
+│   ├── fitting.py          # Profile likelihood optimization
 │   └── output.py           # Save results and plots
 ├── scripts/
 │   └── run_fit.py          # Main entry point

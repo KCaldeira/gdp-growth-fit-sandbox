@@ -28,22 +28,10 @@ def main():
         help="Output directory (default: timestamped subdirectory of data/output)"
     )
     parser.add_argument(
-        "--max-iter",
+        "--n-grid",
         type=int,
-        default=100,
-        help="Maximum iterations for alternating estimation"
-    )
-    parser.add_argument(
-        "--tol",
-        type=float,
-        default=1e-6,
-        help="Convergence tolerance"
-    )
-    parser.add_argument(
-        "--alpha-init",
-        type=float,
-        default=None,
-        help="Initial value for alpha (default: grid search to find best starting point)"
+        default=20,
+        help="Number of grid points for initial alpha search"
     )
     parser.add_argument(
         "--quiet", "-q",
@@ -63,9 +51,7 @@ def main():
     print("\nFitting model...")
     result = fit_model(
         data,
-        max_iter=args.max_iter,
-        tol=args.tol,
-        alpha_init=args.alpha_init,
+        n_grid=args.n_grid,
         verbose=not args.quiet,
     )
 

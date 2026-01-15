@@ -1,10 +1,14 @@
-"""Alternating estimation algorithm for GDP growth curve fitting.
+"""Profile likelihood optimization for GDP growth curve fitting.
 
 The model has both non-linear (g) and linear (h, j, k) components.
-We use alternating estimation:
-1. Fix GDP0, alpha -> solve linear problem for h, j, k
-2. Fix h, j, k -> optimize over GDP0, alpha
-3. Iterate until convergence
+We use profile likelihood optimization:
+1. For each candidate alpha, solve the full linear least squares for h, j, k
+2. This gives the true objective as a function of alpha alone
+3. Minimize over alpha using grid search + Brent's method
+4. GDP0 is fixed to population-weighted mean GDP
+
+This approach is superior to alternating estimation because it always
+evaluates the true objective for each alpha candidate.
 """
 
 import numpy as np
@@ -150,20 +154,41 @@ def objective_alpha_only(alpha: float, GDP0: float, data: FittingData,
     return np.sum(residuals**2)
 
 
-def fit_model(data: FittingData, max_iter: int = 100, tol: float = 1e-8,
-              alpha_tol: float = 1e-6, min_iter: int = 5,
-              alpha_init: float = None, verbose: bool = True) -> FitResult:
-    """Fit the full model using alternating estimation.
+def objective_for_alpha(alpha: float, GDP0: float, data: FittingData) -> float:
+    """Compute the best possible objective for a given alpha.
+
+    This solves the full linear subproblem for h, j, k given alpha,
+    then returns the sum of squared residuals.
+    """
+    if alpha <= 0 or alpha >= 1:
+        return 1e20
+
+    g_values = g_func(data.pcGDP, GDP0, alpha)
+    h_params, j0, j1, j2, k = solve_linear_subproblem(data, g_values)
+
+    # Compute predictions and residuals
+    h_vals = h_func(data.temp, data.precp, *h_params)
+    j_vals = j_func(data.country_idx, data.time, j0, j1, j2)
+    k_vals = k_func(data.year_idx, k)
+
+    pred = g_values * h_vals + j_vals + k_vals
+    residuals = data.growth_pcGDP - pred
+
+    return np.sum(residuals**2)
+
+
+def fit_model(data: FittingData, n_grid: int = 20, verbose: bool = True) -> FitResult:
+    """Fit the full model by optimizing alpha with linear subproblem solved exactly.
+
+    For each candidate alpha, we solve the full linear least squares problem
+    for h, j, k parameters. This gives the true objective as a function of alpha,
+    which we then minimize using scipy's bounded optimizer.
 
     GDP0 is fixed to the population-weighted mean GDP from the data.
 
     Args:
         data: FittingData object
-        max_iter: Maximum number of alternating iterations
-        tol: Convergence tolerance (relative change in objective)
-        alpha_tol: Convergence tolerance for alpha parameter change
-        min_iter: Minimum iterations before checking convergence
-        alpha_init: Initial value for alpha (if None, uses grid search)
+        n_grid: Number of grid points for initial search (default: 20)
         verbose: Print progress
 
     Returns:
@@ -173,92 +198,71 @@ def fit_model(data: FittingData, max_iter: int = 100, tol: float = 1e-8,
     GDP0 = data.pop_weighted_mean_gdp
 
     if verbose:
-        print(f"Starting alternating estimation...")
+        print(f"Fitting model...")
         print(f"  N={data.n_obs}, countries={data.n_countries}, years={data.n_years}")
         print(f"  GDP0 (fixed) = {GDP0:.2f} (pop-weighted mean GDP, {data.gdp0_reference_year})")
 
-    # If no alpha_init provided, do grid search to find best starting point
-    grid_search_alphas = None
-    grid_search_objectives = None
+    # Step 1: Grid search to understand the landscape
+    if verbose:
+        print(f"\n  Step 1: Grid search over alpha ({n_grid} points)...")
 
-    if alpha_init is None:
+    alpha_grid = np.linspace(0.01, 0.99, n_grid)
+    objectives = []
+
+    for test_alpha in alpha_grid:
+        obj = objective_for_alpha(test_alpha, GDP0, data)
+        objectives.append(obj)
         if verbose:
-            print(f"  Grid search for initial alpha...")
-        alpha_grid = np.linspace(0.01, 0.99, 20)
-        objectives = []
-        best_obj = float('inf')
-        best_alpha = 0.1
+            print(f"    alpha={test_alpha:.3f}: obj={obj:.6f}")
 
-        for test_alpha in alpha_grid:
-            g_values = g_func(data.pcGDP, GDP0, test_alpha)
-            h_params, j0, j1, j2, k = solve_linear_subproblem(data, g_values)
-            obj = objective_alpha_only(test_alpha, GDP0, data, h_params, j0, j1, j2, k)
-            objectives.append(obj)
-            if verbose:
-                print(f"    alpha={test_alpha:.2f}: obj={obj:.4f}")
-            if obj < best_obj:
-                best_obj = obj
-                best_alpha = test_alpha
+    grid_search_alphas = alpha_grid
+    grid_search_objectives = np.array(objectives)
 
-        # Save grid search results
-        grid_search_alphas = alpha_grid
-        grid_search_objectives = np.array(objectives)
-
-        alpha = best_alpha
-        if verbose:
-            print(f"  Best initial alpha: {alpha:.2f} (obj={best_obj:.4f})")
-    else:
-        alpha = alpha_init
-
-    objective_history = []
-    alpha_history = [alpha]
+    # Find best from grid
+    best_grid_idx = np.argmin(objectives)
+    best_grid_alpha = alpha_grid[best_grid_idx]
+    best_grid_obj = objectives[best_grid_idx]
 
     if verbose:
-        print(f"  Convergence: tol={tol:.0e}, alpha_tol={alpha_tol:.0e}, min_iter={min_iter}")
+        print(f"  Grid search best: alpha={best_grid_alpha:.3f}, obj={best_grid_obj:.6f}")
 
-    for iteration in range(max_iter):
-        # Step 1: Fix g, solve for h, j, k
-        g_values = g_func(data.pcGDP, GDP0, alpha)
-        h_params, j0, j1, j2, k = solve_linear_subproblem(data, g_values)
+    # Step 2: Refine with bounded optimization
+    if verbose:
+        print(f"\n  Step 2: Refining with Brent's method...")
 
-        # Step 2: Fix h, j, k, optimize over alpha only (GDP0 is fixed)
-        result = optimize.minimize_scalar(
-            objective_alpha_only,
-            args=(GDP0, data, h_params, j0, j1, j2, k),
-            bounds=(0.0, 1.0),
-            method='bounded',
-        )
+    # Track function evaluations
+    eval_history = []
 
-        alpha_new = result.x
-        obj = result.fun
-        objective_history.append(obj)
-        alpha_history.append(alpha_new)
-
-        # Compute changes
-        alpha_change = abs(alpha_new - alpha)
-        if iteration > 0:
-            rel_change = abs(objective_history[-1] - objective_history[-2]) / (
-                abs(objective_history[-2]) + 1e-10
-            )
-        else:
-            rel_change = float('inf')
-
-        # Print progress
+    def tracked_objective(alpha):
+        obj = objective_for_alpha(alpha, GDP0, data)
+        eval_history.append((alpha, obj))
         if verbose:
-            print(f"  Iter {iteration}: obj={obj:.6f}, alpha={alpha_new:.6f}, "
-                  f"d_alpha={alpha_change:.2e}, rel_change={rel_change:.2e}")
+            print(f"    alpha={alpha:.6f}: obj={obj:.6f}")
+        return obj
 
-        # Check convergence (only after min_iter)
-        if iteration >= min_iter:
-            if rel_change < tol and alpha_change < alpha_tol:
-                if verbose:
-                    print(f"  Converged at iteration {iteration}")
-                alpha = alpha_new
-                break
+    result = optimize.minimize_scalar(
+        tracked_objective,
+        bounds=(0.01, 0.99),
+        method='bounded',
+        options={'xatol': 1e-6}
+    )
 
-        alpha = alpha_new
+    alpha = result.x
+    final_obj = result.fun
 
-    converged = iteration < max_iter - 1
+    if verbose:
+        print(f"  Optimization converged: alpha={alpha:.6f}, obj={final_obj:.6f}")
+        print(f"  Function evaluations: {len(eval_history)}")
+
+    # Step 3: Get final parameters at optimal alpha
+    if verbose:
+        print(f"\n  Step 3: Computing final parameters...")
+
+    g_values = g_func(data.pcGDP, GDP0, alpha)
+    h_params, j0, j1, j2, k = solve_linear_subproblem(data, g_values)
+
+    converged = result.success
+    objective_history = [obj for _, obj in eval_history]
 
     # Final solve for linear parameters with converged g
     g_values = g_func(data.pcGDP, GDP0, alpha)
@@ -304,7 +308,7 @@ def fit_model(data: FittingData, max_iter: int = 100, tol: float = 1e-8,
         rmse=rmse,
         aic=aic,
         bic=bic,
-        n_iterations=iteration + 1,
+        n_iterations=n_grid + len(eval_history),  # Grid search + Brent evaluations
         converged=converged,
         objective_history=objective_history,
         grid_search_alphas=grid_search_alphas,
