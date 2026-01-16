@@ -23,7 +23,10 @@ from scipy.sparse.linalg import lsqr
 from typing import Tuple, Optional
 from dataclasses import dataclass
 
-from .model import ModelParams, g_func, h_func, j_func, k_func, predict_from_data
+from .model import (
+    ModelParams, g_func, h_func, h_func_constrained, j_func, k_func,
+    predict_from_data, constrained_to_unconstrained_h,
+)
 from .data_loader import FittingData
 
 
@@ -47,6 +50,10 @@ class FitResult:
     # Grid search results (if performed)
     grid_search_alphas: Optional[np.ndarray] = None
     grid_search_objectives: Optional[np.ndarray] = None
+    # Constrained model parameters (when constrained=True)
+    constrained: bool = False
+    T_opt: Optional[float] = None  # Optimal temperature (constrained model)
+    P_opt: Optional[float] = None  # Optimal precipitation (constrained model)
 
 
 def build_linear_design_matrix(
@@ -371,6 +378,295 @@ def fit_model(
         model_variant=model_variant,
         grid_search_alphas=grid_search_alphas,
         grid_search_objectives=grid_search_objectives,
+    )
+
+
+# ============================================================================
+# Constrained model fitting: h(T*, P*) = 0
+# ============================================================================
+
+def build_constrained_design_matrix(
+    data: FittingData,
+    g_values: np.ndarray,
+    T_opt: float,
+    P_opt: float,
+) -> np.ndarray:
+    """Build design matrix for constrained model with fixed T_opt, P_opt.
+
+    Model: y = g*h2*(T - T_opt)^2 + g*h4*(P - P_opt)^2 + j + k
+
+    Columns: g*(T-T_opt)^2, g*(P-P_opt)^2, j0[i], j1[i]*t, j2[i]*t^2, k[y>0]
+
+    Args:
+        data: FittingData object
+        g_values: Precomputed g(GDP) values for each observation
+        T_opt: Optimal temperature
+        P_opt: Optimal precipitation
+
+    Returns:
+        Design matrix X
+    """
+    n = data.n_obs
+    n_countries = data.n_countries
+    n_years = data.n_years
+
+    # h parameters: 2 columns for h2 and h4
+    X_h = np.column_stack([
+        g_values * (data.temp - T_opt)**2,   # h2 column
+        g_values * (data.precp - P_opt)**2,  # h4 column
+    ])
+
+    # j parameters: 3 * n_countries columns (same as base model)
+    X_j = np.zeros((n, 3 * n_countries))
+    for obs_idx in range(n):
+        i = data.country_idx[obs_idx]
+        t = data.time[obs_idx]
+        X_j[obs_idx, i] = 1.0                     # j0[i]
+        X_j[obs_idx, n_countries + i] = t        # j1[i] * t
+        X_j[obs_idx, 2 * n_countries + i] = t**2  # j2[i] * t^2
+
+    # k parameters: n_years - 1 columns (drop k[0] for identifiability)
+    X_k = np.zeros((n, n_years - 1))
+    for obs_idx in range(n):
+        y = data.year_idx[obs_idx]
+        if y > 0:
+            X_k[obs_idx, y - 1] = 1.0
+
+    # Combine all columns
+    X = np.hstack([X_h, X_j, X_k])
+
+    return X
+
+
+def solve_constrained_subproblem(
+    data: FittingData,
+    g_values: np.ndarray,
+    T_opt: float,
+    P_opt: float,
+) -> Tuple[float, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Solve for h2, h4, j, k given fixed alpha, T_opt, P_opt.
+
+    Args:
+        data: FittingData object
+        g_values: Precomputed g(GDP) values
+        T_opt: Optimal temperature
+        P_opt: Optimal precipitation
+
+    Returns:
+        h2, h4, j0, j1, j2, k
+    """
+    from scipy import linalg
+
+    X = build_constrained_design_matrix(data, g_values, T_opt, P_opt)
+    y = data.growth_pcGDP
+
+    beta, residuals, rank, s = linalg.lstsq(X, y, cond=None, lapack_driver='gelsy')
+
+    n_countries = data.n_countries
+    n_years = data.n_years
+
+    h2 = beta[0]
+    h4 = beta[1]
+
+    j0 = beta[2:2 + n_countries]
+    j1 = beta[2 + n_countries:2 + 2 * n_countries]
+    j2 = beta[2 + 2 * n_countries:2 + 3 * n_countries]
+
+    k = np.zeros(n_years)
+    k[1:] = beta[2 + 3 * n_countries:]
+
+    return h2, h4, j0, j1, j2, k
+
+
+def compute_constrained_predictions(
+    data: FittingData,
+    g_values: np.ndarray,
+    T_opt: float,
+    P_opt: float,
+    h2: float,
+    h4: float,
+    j0: np.ndarray,
+    j1: np.ndarray,
+    j2: np.ndarray,
+    k: np.ndarray,
+) -> np.ndarray:
+    """Compute predictions for constrained model.
+
+    pred = g * h2 * (T - T_opt)^2 + g * h4 * (P - P_opt)^2 + j + k
+    """
+    h_vals = h_func_constrained(data.temp, data.precp, T_opt, P_opt, h2, h4)
+    j_vals = j_func(data.country_idx, data.time, j0, j1, j2)
+    k_vals = k_func(data.year_idx, k)
+
+    return g_values * h_vals + j_vals + k_vals
+
+
+def objective_constrained(
+    params: np.ndarray,
+    GDP0: float,
+    data: FittingData,
+) -> float:
+    """Objective function for constrained 3-parameter optimization.
+
+    Args:
+        params: [alpha, T_opt, P_opt]
+        GDP0: Fixed reference GDP
+        data: FittingData object
+
+    Returns:
+        Sum of squared residuals
+    """
+    alpha, T_opt, P_opt = params
+
+    # Bounds checking (should be handled by optimizer, but be safe)
+    if alpha <= 0 or alpha >= 1:
+        return 1e20
+
+    g_values = g_func(data.pcGDP, GDP0, alpha)
+    h2, h4, j0, j1, j2, k = solve_constrained_subproblem(data, g_values, T_opt, P_opt)
+
+    pred = compute_constrained_predictions(
+        data, g_values, T_opt, P_opt, h2, h4, j0, j1, j2, k
+    )
+    residuals = data.growth_pcGDP - pred
+
+    return np.sum(residuals**2)
+
+
+def fit_model_constrained(
+    data: FittingData,
+    verbose: bool,
+) -> FitResult:
+    """Fit model with h(T*, P*) = 0 constraint.
+
+    Uses reparameterization: h(T, P) = h2*(T - T*)^2 + h4*(P - P*)^2
+
+    Optimizes 3 parameters (alpha, T_opt, P_opt) with linear subproblem
+    for (h2, h4, j, k).
+
+    Args:
+        data: FittingData object
+        verbose: Print progress
+
+    Returns:
+        FitResult object with constrained=True
+    """
+    GDP0 = data.pop_weighted_mean_gdp
+
+    # Bounds for optimization
+    T_min, T_max = data.temp.min(), data.temp.max()
+    P_min, P_max = data.precp.min(), data.precp.max()
+
+    if verbose:
+        print(f"Fitting constrained model...")
+        print(f"  Model: h(T, P) = h2*(T - T*)^2 + h4*(P - P*)^2")
+        print(f"  N={data.n_obs}, countries={data.n_countries}, years={data.n_years}")
+        print(f"  GDP0 (fixed) = {GDP0:.2f} (pop-weighted mean GDP, {data.gdp0_reference_year})")
+        print(f"  T* bounds: [{T_min:.1f}, {T_max:.1f}]°C")
+        print(f"  P* bounds: [{P_min:.2f}, {P_max:.2f}]")
+
+    # Initial guess: alpha=0.4, T/P at median values
+    x0 = np.array([0.4, np.median(data.temp), np.median(data.precp)])
+    bounds = [(0.01, 0.99), (T_min, T_max), (P_min, P_max)]
+
+    # Track evaluations
+    eval_history = []
+
+    def tracked_objective(params):
+        obj = objective_constrained(params, GDP0, data)
+        eval_history.append((params.copy(), obj))
+        if verbose and len(eval_history) % 50 == 0:
+            print(f"    Iteration {len(eval_history)}: "
+                  f"alpha={params[0]:.6f}, T*={params[1]:.2f}, P*={params[2]:.2f}, "
+                  f"obj={obj:.6f}")
+        return obj
+
+    if verbose:
+        print(f"\n  Optimizing with L-BFGS-B...")
+
+    result = optimize.minimize(
+        tracked_objective,
+        x0=x0,
+        method='L-BFGS-B',
+        bounds=bounds,
+        options={'maxiter': 1000, 'ftol': 1e-10}
+    )
+
+    alpha, T_opt, P_opt = result.x
+    final_obj = result.fun
+    converged = result.success
+
+    if verbose:
+        print(f"  Optimization {'converged' if converged else 'stopped'}: "
+              f"alpha={alpha:.6f}, T*={T_opt:.2f}°C, P*={P_opt:.4f}")
+        print(f"  Final objective: {final_obj:.6f}")
+        print(f"  Function evaluations: {len(eval_history)}")
+
+    # Get final parameters
+    g_values = g_func(data.pcGDP, GDP0, alpha)
+    h2, h4, j0, j1, j2, k = solve_constrained_subproblem(data, g_values, T_opt, P_opt)
+
+    # Convert to unconstrained form for ModelParams
+    h0, h1, h2_out, h3, h4_out = constrained_to_unconstrained_h(T_opt, P_opt, h2, h4)
+
+    params = ModelParams(
+        GDP0=GDP0, alpha=alpha,
+        h0=h0, h1=h1, h2=h2, h3=h3, h4=h4,
+        j0=j0, j1=j1, j2=j2, k=k,
+    )
+
+    # Compute predictions and residuals
+    predictions = compute_constrained_predictions(
+        data, g_values, T_opt, P_opt, h2, h4, j0, j1, j2, k
+    )
+    residuals = data.growth_pcGDP - predictions
+
+    # Fit statistics
+    ss_res = np.sum(residuals**2)
+    ss_tot = np.sum((data.growth_pcGDP - np.mean(data.growth_pcGDP))**2)
+    r_squared = 1 - ss_res / ss_tot
+    rmse = np.sqrt(ss_res / data.n_obs)
+
+    # AIC/BIC: 3 nonlinear params (alpha, T_opt, P_opt) + 2 h params (h2, h4)
+    # + 3*n_countries j params + (n_years-1) k params
+    # But h2 and h4 are from linear solve, so effectively 3 nonlinear params
+    # For consistency with unconstrained, count all linear params
+    n_params = 1 + 2 + 3 * data.n_countries + (data.n_years - 1)  # alpha + h2,h4 + j + k
+    log_likelihood = -data.n_obs / 2 * (np.log(2 * np.pi * ss_res / data.n_obs) + 1)
+    aic = 2 * n_params - 2 * log_likelihood
+    bic = np.log(data.n_obs) * n_params - 2 * log_likelihood
+
+    if verbose:
+        print(f"\nFit complete:")
+        print(f"  R² = {r_squared:.4f}")
+        print(f"  RMSE = {rmse:.6f}")
+        print(f"  AIC = {aic:.1f}, BIC = {bic:.1f}")
+        print(f"\nConstrained parameters:")
+        print(f"  T* = {T_opt:.2f}°C")
+        print(f"  P* = {P_opt:.4f}")
+        print(f"  h2 = {h2:.6e}")
+        print(f"  h4 = {h4:.6e}")
+        print(f"\nDerived unconstrained parameters:")
+        print(f"  h0 = {h0:.6e}")
+        print(f"  h1 = {h1:.6e}")
+        print(f"  h3 = {h3:.6e}")
+
+    objective_history = [obj for _, obj in eval_history]
+
+    return FitResult(
+        params=params,
+        residuals=residuals,
+        r_squared=r_squared,
+        rmse=rmse,
+        aic=aic,
+        bic=bic,
+        n_iterations=len(eval_history),
+        converged=converged,
+        objective_history=objective_history,
+        model_variant="base",  # Constrained only for base model
+        constrained=True,
+        T_opt=T_opt,
+        P_opt=P_opt,
     )
 
 

@@ -19,7 +19,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from src.data_loader import load_data
-from src.fitting import fit_model
+from src.fitting import fit_model, fit_model_constrained
 from src.bootstrap import (
     run_bootstrap,
     compute_h_uncertainty_bands,
@@ -192,16 +192,23 @@ def plot_optimal_temperature_distribution(
     """Plot the bootstrap distribution of optimal temperature T*."""
     params = bootstrap_result.params
 
-    # Point estimate
-    T_opt_point = -params.h1 / (2 * params.h2)
+    if bootstrap_result.constrained:
+        # Constrained model: T* is directly estimated
+        T_opt_point = bootstrap_result.T_opt_point
+        valid_mask = ~np.isnan(bootstrap_result.T_opt_samples)
+        T_opt_samples = bootstrap_result.T_opt_samples[valid_mask]
+        T_opt_clean = T_opt_samples  # No need to remove outliers, bounded by optimization
+        title_suffix = "(Constrained Model)"
+    else:
+        # Unconstrained model: T* derived from h1, h2
+        T_opt_point = -params.h1 / (2 * params.h2)
+        T_opt_samples = compute_optimal_T_distribution(bootstrap_result)
 
-    # Bootstrap distribution
-    T_opt_samples = compute_optimal_T_distribution(bootstrap_result)
-
-    # Remove any extreme outliers (e.g., if h2 ≈ 0 in some samples)
-    T_opt_clean = T_opt_samples[np.isfinite(T_opt_samples)]
-    q1, q99 = np.percentile(T_opt_clean, [1, 99])
-    T_opt_clean = T_opt_clean[(T_opt_clean >= q1) & (T_opt_clean <= q99)]
+        # Remove any extreme outliers (e.g., if h2 ≈ 0 in some samples)
+        T_opt_clean = T_opt_samples[np.isfinite(T_opt_samples)]
+        q1, q99 = np.percentile(T_opt_clean, [1, 99])
+        T_opt_clean = T_opt_clean[(T_opt_clean >= q1) & (T_opt_clean <= q99)]
+        title_suffix = "(Derived from h1, h2)"
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
@@ -222,7 +229,7 @@ def plot_optimal_temperature_distribution(
 
     ax.set_xlabel('Optimal Temperature T* (°C)', fontsize=12)
     ax.set_ylabel('Density', fontsize=12)
-    ax.set_title('Bootstrap Distribution of Optimal Temperature', fontsize=14)
+    ax.set_title(f'Bootstrap Distribution of T* {title_suffix}', fontsize=14)
     ax.legend(loc='best')
 
     # Right: Box plot + swarm
@@ -243,6 +250,60 @@ def plot_optimal_temperature_distribution(
     plt.savefig(output_dir / "bootstrap_optimal_temperature.png", dpi=150)
     plt.close()
     print(f"  Saved: bootstrap_optimal_temperature.png")
+
+
+def plot_optimal_precipitation_distribution(
+    bootstrap_result: BootstrapResult,
+    output_dir: Path,
+) -> None:
+    """Plot the bootstrap distribution of optimal precipitation P* (constrained only)."""
+    if not bootstrap_result.constrained:
+        return  # Only for constrained model
+
+    P_opt_point = bootstrap_result.P_opt_point
+    valid_mask = ~np.isnan(bootstrap_result.P_opt_samples)
+    P_opt_samples = bootstrap_result.P_opt_samples[valid_mask]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Left: Histogram
+    ax = axes[0]
+    ax.hist(P_opt_samples, bins=50, density=True, alpha=0.7, color='teal',
+            edgecolor='black', linewidth=0.5)
+
+    # Mark point estimate and percentiles
+    p2_5, p50, p97_5 = np.percentile(P_opt_samples, [2.5, 50, 97.5])
+    ax.axvline(x=P_opt_point, color='red', linestyle='-', linewidth=2,
+               label=f'Point est: {P_opt_point:.4f}')
+    ax.axvline(x=p50, color='blue', linestyle='--', linewidth=2,
+               label=f'Median: {p50:.4f}')
+    ax.axvline(x=p2_5, color='gray', linestyle=':', linewidth=1.5,
+               label=f'95% CI: [{p2_5:.4f}, {p97_5:.4f}]')
+    ax.axvline(x=p97_5, color='gray', linestyle=':', linewidth=1.5)
+
+    ax.set_xlabel('Optimal Log-Precipitation P*', fontsize=12)
+    ax.set_ylabel('Density', fontsize=12)
+    ax.set_title('Bootstrap Distribution of P* (Constrained Model)', fontsize=14)
+    ax.legend(loc='best')
+
+    # Right: Box plot
+    ax = axes[1]
+    bp = ax.boxplot(P_opt_samples, vert=True, patch_artist=True)
+    bp['boxes'][0].set_facecolor('lightgreen')
+
+    # Overlay point estimate
+    ax.scatter([1], [P_opt_point], color='red', s=100, zorder=5,
+               label=f'Point est: {P_opt_point:.4f}', marker='D')
+
+    ax.set_ylabel('Optimal Log-Precipitation P*', fontsize=12)
+    ax.set_title('Bootstrap Distribution Summary', fontsize=14)
+    ax.set_xticks([])
+    ax.legend(loc='best')
+
+    plt.tight_layout()
+    plt.savefig(output_dir / "bootstrap_optimal_precipitation.png", dpi=150)
+    plt.close()
+    print(f"  Saved: bootstrap_optimal_precipitation.png")
 
 
 def plot_dhdT_marginal_effect(
@@ -343,19 +404,36 @@ def save_bootstrap_coefficients(
     alpha_samples = bootstrap_result.alpha_samples[valid_mask]
     h_samples = bootstrap_result.h_samples[valid_mask]
 
-    # Create DataFrame with all global (time/country-independent) coefficients
-    df = pd.DataFrame({
-        'iteration': np.arange(1, len(alpha_samples) + 1),
-        'alpha': alpha_samples,
-        'h0': h_samples[:, 0],
-        'h1': h_samples[:, 1],
-        'h2': h_samples[:, 2],
-        'h3': h_samples[:, 3],
-        'h4': h_samples[:, 4],
-    })
+    if bootstrap_result.constrained:
+        # Constrained model: include T_opt and P_opt
+        T_opt_samples = bootstrap_result.T_opt_samples[valid_mask]
+        P_opt_samples = bootstrap_result.P_opt_samples[valid_mask]
 
-    # Also compute derived quantities
-    df['T_optimal'] = -df['h1'] / (2 * df['h2'])
+        df = pd.DataFrame({
+            'iteration': np.arange(1, len(alpha_samples) + 1),
+            'alpha': alpha_samples,
+            'T_opt': T_opt_samples,
+            'P_opt': P_opt_samples,
+            'h2': h_samples[:, 2],
+            'h4': h_samples[:, 4],
+            # Derived unconstrained parameters
+            'h0': h_samples[:, 0],
+            'h1': h_samples[:, 1],
+            'h3': h_samples[:, 3],
+        })
+    else:
+        # Unconstrained model
+        df = pd.DataFrame({
+            'iteration': np.arange(1, len(alpha_samples) + 1),
+            'alpha': alpha_samples,
+            'h0': h_samples[:, 0],
+            'h1': h_samples[:, 1],
+            'h2': h_samples[:, 2],
+            'h3': h_samples[:, 3],
+            'h4': h_samples[:, 4],
+        })
+        # Compute derived optimal temperature
+        df['T_optimal'] = -df['h1'] / (2 * df['h2'])
 
     csv_path = output_dir / "bootstrap_coefficients.csv"
     df.to_csv(csv_path, index=False)
@@ -377,7 +455,12 @@ def save_bootstrap_summary(
         f.write("Cluster Bootstrap Uncertainty Analysis\n")
         f.write("=" * 50 + "\n\n")
         f.write(f"Bootstrap iterations: {bootstrap_result.n_bootstrap}\n")
-        f.write(f"Successful fits: {bootstrap_result.n_successful}\n\n")
+        f.write(f"Successful fits: {bootstrap_result.n_successful}\n")
+        if bootstrap_result.constrained:
+            f.write(f"Model: Constrained (h(T*, P*) = 0)\n")
+        else:
+            f.write(f"Model variant: {bootstrap_result.model_variant}\n")
+        f.write("\n")
 
         f.write("Parameter Estimates (Point Est, [95% Bootstrap CI])\n")
         f.write("-" * 50 + "\n\n")
@@ -386,27 +469,53 @@ def save_bootstrap_summary(
         p2_5, p50, p97_5 = np.percentile(alpha_samples, [2.5, 50, 97.5])
         f.write(f"alpha:  {params.alpha:.6f}  [{p2_5:.6f}, {p97_5:.6f}]\n\n")
 
-        # h parameters
-        h_names = ['h0', 'h1', 'h2', 'h3', 'h4']
-        h_point = [params.h0, params.h1, params.h2, params.h3, params.h4]
-        for i, name in enumerate(h_names):
-            p2_5, p50, p97_5 = np.percentile(h_samples[:, i], [2.5, 50, 97.5])
-            f.write(f"{name}:  {h_point[i]:.6e}  [{p2_5:.6e}, {p97_5:.6e}]\n")
+        if bootstrap_result.constrained:
+            # Constrained model: show T*, P*, h2, h4 first
+            T_opt_samples = bootstrap_result.T_opt_samples[valid_mask]
+            P_opt_samples = bootstrap_result.P_opt_samples[valid_mask]
 
-        f.write("\n")
+            p2_5, p50, p97_5 = np.percentile(T_opt_samples, [2.5, 50, 97.5])
+            f.write(f"T* (optimal temp):  {bootstrap_result.T_opt_point:.2f}°C  [{p2_5:.2f}, {p97_5:.2f}]°C\n")
 
-        # Optimal temperature
-        T_opt_point = -params.h1 / (2 * params.h2)
-        T_opt_samples = compute_optimal_T_distribution(bootstrap_result)
-        T_opt_clean = T_opt_samples[np.isfinite(T_opt_samples)]
-        q1, q99 = np.percentile(T_opt_clean, [1, 99])
-        T_opt_clean = T_opt_clean[(T_opt_clean >= q1) & (T_opt_clean <= q99)]
-        p2_5, p50, p97_5 = np.percentile(T_opt_clean, [2.5, 50, 97.5])
+            p2_5, p50, p97_5 = np.percentile(P_opt_samples, [2.5, 50, 97.5])
+            f.write(f"P* (optimal prec):  {bootstrap_result.P_opt_point:.4f}  [{p2_5:.4f}, {p97_5:.4f}]\n\n")
 
-        f.write(f"\nOptimal Temperature T*:\n")
-        f.write(f"  Point estimate: {T_opt_point:.2f}°C\n")
-        f.write(f"  Bootstrap median: {p50:.2f}°C\n")
-        f.write(f"  95% Bootstrap CI: [{p2_5:.2f}, {p97_5:.2f}]°C\n")
+            f.write("Constrained h parameters:\n")
+            p2_5, p50, p97_5 = np.percentile(h_samples[:, 2], [2.5, 50, 97.5])
+            f.write(f"  h2:  {params.h2:.6e}  [{p2_5:.6e}, {p97_5:.6e}]\n")
+            p2_5, p50, p97_5 = np.percentile(h_samples[:, 4], [2.5, 50, 97.5])
+            f.write(f"  h4:  {params.h4:.6e}  [{p2_5:.6e}, {p97_5:.6e}]\n\n")
+
+            f.write("Derived unconstrained h parameters:\n")
+            p2_5, p50, p97_5 = np.percentile(h_samples[:, 0], [2.5, 50, 97.5])
+            f.write(f"  h0:  {params.h0:.6e}  [{p2_5:.6e}, {p97_5:.6e}]\n")
+            p2_5, p50, p97_5 = np.percentile(h_samples[:, 1], [2.5, 50, 97.5])
+            f.write(f"  h1:  {params.h1:.6e}  [{p2_5:.6e}, {p97_5:.6e}]\n")
+            p2_5, p50, p97_5 = np.percentile(h_samples[:, 3], [2.5, 50, 97.5])
+            f.write(f"  h3:  {params.h3:.6e}  [{p2_5:.6e}, {p97_5:.6e}]\n")
+
+        else:
+            # Unconstrained model: show h parameters
+            h_names = ['h0', 'h1', 'h2', 'h3', 'h4']
+            h_point = [params.h0, params.h1, params.h2, params.h3, params.h4]
+            for i, name in enumerate(h_names):
+                p2_5, p50, p97_5 = np.percentile(h_samples[:, i], [2.5, 50, 97.5])
+                f.write(f"{name}:  {h_point[i]:.6e}  [{p2_5:.6e}, {p97_5:.6e}]\n")
+
+            f.write("\n")
+
+            # Derived optimal temperature (for unconstrained only)
+            T_opt_point = -params.h1 / (2 * params.h2)
+            T_opt_samples = compute_optimal_T_distribution(bootstrap_result)
+            T_opt_clean = T_opt_samples[np.isfinite(T_opt_samples)]
+            q1, q99 = np.percentile(T_opt_clean, [1, 99])
+            T_opt_clean = T_opt_clean[(T_opt_clean >= q1) & (T_opt_clean <= q99)]
+            p2_5, p50, p97_5 = np.percentile(T_opt_clean, [2.5, 50, 97.5])
+
+            f.write(f"\nDerived Optimal Temperature T* = -h1/(2*h2):\n")
+            f.write(f"  Point estimate: {T_opt_point:.2f}°C\n")
+            f.write(f"  Bootstrap median: {p50:.2f}°C\n")
+            f.write(f"  95% Bootstrap CI: [{p2_5:.2f}, {p97_5:.2f}]°C\n")
 
     print(f"  Saved: bootstrap_summary.txt")
 
@@ -426,6 +535,11 @@ def main():
                         help="Model variant: base (g*h + j + k), "
                              "g_scales_hj (g*(h+j) + k), "
                              "g_scales_all (g*(h+j+k)) (default: base)")
+    parser.add_argument("--constrained", action="store_true",
+                        help="Use constrained model with h(T*, P*) = 0. "
+                             "This normalizes the climate response to pass through "
+                             "zero at optimal temperature and precipitation. "
+                             "Only available for base model variant.")
     args = parser.parse_args()
 
     # Create output directory
@@ -440,6 +554,11 @@ def main():
     print("Cluster Bootstrap Uncertainty Analysis")
     print("=" * 60)
 
+    # Validate constrained flag
+    if args.constrained and args.model_variant != "base":
+        print("Error: --constrained is only available for base model variant")
+        return
+
     # Load data
     print(f"\nLoading data from {args.data_file}...")
     data = load_data(args.data_file)
@@ -447,7 +566,14 @@ def main():
 
     # Fit model
     print("\nFitting model...")
-    fit_result = fit_model(data, model_variant=args.model_variant, verbose=True)
+    if args.constrained:
+        fit_result = fit_model_constrained(data, verbose=True)
+        T_opt_point = fit_result.T_opt
+        P_opt_point = fit_result.P_opt
+    else:
+        fit_result = fit_model(data, model_variant=args.model_variant, verbose=True)
+        T_opt_point = None
+        P_opt_point = None
 
     # Run bootstrap
     print(f"\nRunning cluster bootstrap (n={args.n_bootstrap}, seed={args.seed})...")
@@ -458,6 +584,9 @@ def main():
         random_seed=args.seed,
         model_variant=args.model_variant,
         verbose=True,
+        constrained=args.constrained,
+        T_opt_point=T_opt_point,
+        P_opt_point=P_opt_point,
     )
 
     # Temperature range: 0°C to 30°C (standard for climate-growth plots)
@@ -481,6 +610,7 @@ def main():
     plot_g_gdp_response(bootstrap_result, GDP_range, output_dir)
     plot_gh_combined(bootstrap_result, T_range, P_const, GDP_values, output_dir)
     plot_optimal_temperature_distribution(bootstrap_result, output_dir)
+    plot_optimal_precipitation_distribution(bootstrap_result, output_dir)  # Only plots for constrained
     plot_dhdT_marginal_effect(bootstrap_result, T_range, output_dir)
     plot_alpha_distribution(bootstrap_result, output_dir)
     save_bootstrap_coefficients(bootstrap_result, output_dir)

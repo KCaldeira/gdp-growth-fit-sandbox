@@ -86,6 +86,52 @@ def h_func(T: np.ndarray, P: np.ndarray,
     return h0 + h1 * T + h2 * T**2 + h3 * P + h4 * P**2
 
 
+def h_func_constrained(T: np.ndarray, P: np.ndarray,
+                       T_opt: float, P_opt: float, h2: float, h4: float) -> np.ndarray:
+    """Compute constrained h(T, P) = h2*(T - T_opt)^2 + h4*(P - P_opt)^2.
+
+    This parameterization enforces h(T_opt, P_opt) = 0, normalizing the
+    climate response function to pass through zero at optimal temperature
+    and precipitation.
+
+    The equivalent unconstrained parameters are:
+        h1 = -2*h2*T_opt
+        h3 = -2*h4*P_opt
+        h0 = h2*T_opt^2 + h4*P_opt^2
+
+    Args:
+        T: Temperature values
+        P: Log precipitation values
+        T_opt: Optimal temperature (where h is minimized in T)
+        P_opt: Optimal precipitation (where h is minimized in P)
+        h2: Quadratic coefficient for temperature (typically < 0 for maximum)
+        h4: Quadratic coefficient for precipitation (typically < 0 for maximum)
+
+    Returns:
+        h values for each observation
+    """
+    return h2 * (T - T_opt)**2 + h4 * (P - P_opt)**2
+
+
+def constrained_to_unconstrained_h(T_opt: float, P_opt: float,
+                                    h2: float, h4: float) -> tuple:
+    """Convert constrained h parameters to unconstrained form.
+
+    Args:
+        T_opt: Optimal temperature
+        P_opt: Optimal precipitation
+        h2: Quadratic temperature coefficient
+        h4: Quadratic precipitation coefficient
+
+    Returns:
+        Tuple of (h0, h1, h2, h3, h4)
+    """
+    h1 = -2 * h2 * T_opt
+    h3 = -2 * h4 * P_opt
+    h0 = h2 * T_opt**2 + h4 * P_opt**2
+    return h0, h1, h2, h3, h4
+
+
 def j_func(country_idx: np.ndarray, time: np.ndarray,
            j0: np.ndarray, j1: np.ndarray, j2: np.ndarray) -> np.ndarray:
     """Compute j(i, t) = j0[i] + j1[i]*t + j2[i]*t^2.

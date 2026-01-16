@@ -21,12 +21,17 @@ from dataclasses import dataclass
 from scipy import optimize
 from typing import Tuple
 
-from .model import ModelParams, g_func, h_func, j_func, k_func, predict_from_data
+from .model import (
+    ModelParams, g_func, h_func, h_func_constrained, j_func, k_func,
+    predict_from_data, constrained_to_unconstrained_h,
+)
 from .data_loader import FittingData
 from .fitting import (
     build_linear_design_matrix,
     solve_linear_subproblem,
     compute_predictions,
+    solve_constrained_subproblem,
+    compute_constrained_predictions,
 )
 
 
@@ -48,6 +53,13 @@ class BootstrapResult:
     n_bootstrap: int
     n_successful: int  # number of successful bootstrap fits
     model_variant: str  # "base", "g_scales_hj", or "g_scales_all"
+
+    # Constrained model parameters (optional, when constrained=True)
+    constrained: bool = False
+    T_opt_samples: np.ndarray = None  # shape (B,) for constrained model
+    P_opt_samples: np.ndarray = None  # shape (B,) for constrained model
+    T_opt_point: float = None  # Point estimate of T*
+    P_opt_point: float = None  # Point estimate of P*
 
 
 def create_bootstrap_data(
@@ -154,6 +166,69 @@ def fit_bootstrap_sample(
     return alpha, h_params
 
 
+def fit_bootstrap_sample_constrained(
+    boot_data: FittingData,
+    GDP0: float,
+    T_bounds: Tuple[float, float],
+    P_bounds: Tuple[float, float],
+) -> Tuple[float, float, float, float, float]:
+    """Fit constrained model to a bootstrap sample.
+
+    Uses 3-parameter optimization over (alpha, T_opt, P_opt) with linear
+    subproblem for (h2, h4, j, k).
+
+    Args:
+        boot_data: Bootstrap sample data
+        GDP0: Fixed reference GDP
+        T_bounds: (T_min, T_max) bounds for optimal temperature
+        P_bounds: (P_min, P_max) bounds for optimal precipitation
+
+    Returns:
+        alpha, T_opt, P_opt, h2, h4
+    """
+    def objective_for_params(params: np.ndarray) -> float:
+        """Compute best SSR for given (alpha, T_opt, P_opt)."""
+        alpha, T_opt, P_opt = params
+
+        if alpha <= 0 or alpha >= 1:
+            return 1e20
+
+        g_values = g_func(boot_data.pcGDP, GDP0, alpha)
+        h2, h4, j0, j1, j2, k = solve_constrained_subproblem(
+            boot_data, g_values, T_opt, P_opt
+        )
+
+        pred = compute_constrained_predictions(
+            boot_data, g_values, T_opt, P_opt, h2, h4, j0, j1, j2, k
+        )
+        residuals = boot_data.growth_pcGDP - pred
+
+        return np.sum(residuals**2)
+
+    # Initial guess
+    x0 = np.array([0.4, np.median(boot_data.temp), np.median(boot_data.precp)])
+    bounds = [(0.01, 0.99), T_bounds, P_bounds]
+
+    # Optimize
+    result = optimize.minimize(
+        objective_for_params,
+        x0=x0,
+        method='L-BFGS-B',
+        bounds=bounds,
+        options={'maxiter': 500, 'ftol': 1e-8}
+    )
+
+    alpha, T_opt, P_opt = result.x
+
+    # Get h2, h4 at optimal parameters
+    g_values = g_func(boot_data.pcGDP, GDP0, alpha)
+    h2, h4, _, _, _, _ = solve_constrained_subproblem(
+        boot_data, g_values, T_opt, P_opt
+    )
+
+    return alpha, T_opt, P_opt, h2, h4
+
+
 def run_bootstrap(
     data: FittingData,
     params: ModelParams,
@@ -161,6 +236,9 @@ def run_bootstrap(
     random_seed: int,
     model_variant: str,
     verbose: bool,
+    constrained: bool,
+    T_opt_point: float,
+    P_opt_point: float,
 ) -> BootstrapResult:
     """Run cluster bootstrap to get parameter uncertainty.
 
@@ -174,6 +252,9 @@ def run_bootstrap(
         random_seed: Random seed for reproducibility
         model_variant: One of "base", "g_scales_hj", or "g_scales_all"
         verbose: Print progress
+        constrained: Whether to use constrained model (h(T*, P*) = 0)
+        T_opt_point: Point estimate of T* (used for constrained=True, ignored otherwise)
+        P_opt_point: Point estimate of P* (used for constrained=True, ignored otherwise)
 
     Returns:
         BootstrapResult with parameter samples
@@ -185,11 +266,22 @@ def run_bootstrap(
     alpha_samples = np.zeros(n_bootstrap)
     h_samples = np.zeros((n_bootstrap, 5))
 
+    # Constrained-specific storage
+    T_opt_samples = np.zeros(n_bootstrap) if constrained else None
+    P_opt_samples = np.zeros(n_bootstrap) if constrained else None
+
+    # Bounds for constrained optimization
+    T_bounds = (data.temp.min(), data.temp.max())
+    P_bounds = (data.precp.min(), data.precp.max())
+
     n_successful = 0
 
     if verbose:
         print(f"Running cluster bootstrap with {n_bootstrap} iterations...")
-        print(f"  Model variant: {model_variant}")
+        if constrained:
+            print(f"  Mode: Constrained (h(T*, P*) = 0)")
+        else:
+            print(f"  Model variant: {model_variant}")
         print(f"  Resampling {data.n_countries} countries with replacement")
 
     for b in range(n_bootstrap):
@@ -204,7 +296,20 @@ def run_bootstrap(
 
         # Fit model to bootstrap sample
         try:
-            alpha_b, h_b = fit_bootstrap_sample(boot_data, GDP0, model_variant)
+            if constrained:
+                alpha_b, T_opt_b, P_opt_b, h2_b, h4_b = fit_bootstrap_sample_constrained(
+                    boot_data, GDP0, T_bounds, P_bounds
+                )
+                # Convert to unconstrained h parameters for storage
+                h0_b, h1_b, _, h3_b, _ = constrained_to_unconstrained_h(
+                    T_opt_b, P_opt_b, h2_b, h4_b
+                )
+                h_b = np.array([h0_b, h1_b, h2_b, h3_b, h4_b])
+
+                T_opt_samples[b] = T_opt_b
+                P_opt_samples[b] = P_opt_b
+            else:
+                alpha_b, h_b = fit_bootstrap_sample(boot_data, GDP0, model_variant)
 
             alpha_samples[b] = alpha_b
             h_samples[b, :] = h_b
@@ -215,6 +320,9 @@ def run_bootstrap(
                 print(f"  Warning: Bootstrap iteration {b} failed: {e}")
             alpha_samples[b] = np.nan
             h_samples[b, :] = np.nan
+            if constrained:
+                T_opt_samples[b] = np.nan
+                P_opt_samples[b] = np.nan
 
     if verbose:
         print(f"  Completed {n_successful}/{n_bootstrap} bootstrap iterations")
@@ -226,6 +334,11 @@ def run_bootstrap(
         n_bootstrap=n_bootstrap,
         n_successful=n_successful,
         model_variant=model_variant,
+        constrained=constrained,
+        T_opt_samples=T_opt_samples,
+        P_opt_samples=P_opt_samples,
+        T_opt_point=T_opt_point if constrained else None,
+        P_opt_point=P_opt_point if constrained else None,
     )
 
 
