@@ -45,14 +45,18 @@ class BootstrapResult:
     alpha_samples: np.ndarray  # shape (B,)
     h_samples: np.ndarray      # shape (B, 5) for h0, h1, h2, h3, h4
 
-    # Optional: full parameter samples (not stored by default to save memory)
-    # j and k parameters vary in dimension across bootstrap samples due to
-    # potentially different numbers of unique countries/years
+    # Full parameter samples (j and k)
+    j0_samples: np.ndarray     # shape (B, n_countries)
+    j1_samples: np.ndarray     # shape (B, n_countries)
+    j2_samples: np.ndarray     # shape (B, n_countries)
+    k_samples: np.ndarray      # shape (B, n_years)
 
     # Metadata
     n_bootstrap: int
     n_successful: int  # number of successful bootstrap fits
     model_variant: str  # "base", "g_scales_hj", or "g_scales_all"
+    n_countries: int   # number of countries (for interpreting j samples)
+    n_years: int       # number of years (for interpreting k samples)
 
     # Constrained model parameters (optional, when constrained=True)
     constrained: bool = False
@@ -130,11 +134,11 @@ def fit_bootstrap_sample(
     boot_data: FittingData,
     GDP0: float,
     model_variant: str,
-) -> Tuple[float, np.ndarray]:
+) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Fit model to a bootstrap sample.
 
     Returns:
-        alpha, h_params (array of 5 values, with h0=0 for non-base variants)
+        alpha, h_params (array of 5 values), j0, j1, j2, k
     """
     def objective_for_alpha(alpha: float) -> float:
         """Compute best SSR for given alpha."""
@@ -159,11 +163,11 @@ def fit_bootstrap_sample(
 
     alpha = result.x
 
-    # Get h parameters at optimal alpha
+    # Get all parameters at optimal alpha
     g_values = g_func(boot_data.pcGDP, GDP0, alpha)
-    h_params, _, _, _, _ = solve_linear_subproblem(boot_data, g_values, model_variant)
+    h_params, j0, j1, j2, k = solve_linear_subproblem(boot_data, g_values, model_variant)
 
-    return alpha, h_params
+    return alpha, h_params, j0, j1, j2, k
 
 
 def fit_bootstrap_sample_constrained(
@@ -171,6 +175,9 @@ def fit_bootstrap_sample_constrained(
     GDP0: float,
     T_bounds: Tuple[float, float],
     P_bounds: Tuple[float, float],
+    alpha_init: float,
+    T_opt_init: float,
+    P_opt_init: float,
 ) -> Tuple[float, float, float, float, float]:
     """Fit constrained model to a bootstrap sample.
 
@@ -182,6 +189,9 @@ def fit_bootstrap_sample_constrained(
         GDP0: Fixed reference GDP
         T_bounds: (T_min, T_max) bounds for optimal temperature
         P_bounds: (P_min, P_max) bounds for optimal precipitation
+        alpha_init: Initial guess for alpha (from point estimate)
+        T_opt_init: Initial guess for T_opt (from point estimate)
+        P_opt_init: Initial guess for P_opt (from point estimate)
 
     Returns:
         alpha, T_opt, P_opt, h2, h4
@@ -205,17 +215,17 @@ def fit_bootstrap_sample_constrained(
 
         return np.sum(residuals**2)
 
-    # Initial guess
-    x0 = np.array([0.4, np.median(boot_data.temp), np.median(boot_data.precp)])
+    # Use point estimates as initial guess (warm start)
+    x0 = np.array([alpha_init, T_opt_init, P_opt_init])
     bounds = [(0.01, 0.99), T_bounds, P_bounds]
 
-    # Optimize
+    # Use L-BFGS-B with warm start and larger eps for gradient estimation
     result = optimize.minimize(
         objective_for_params,
         x0=x0,
         method='L-BFGS-B',
         bounds=bounds,
-        options={'maxiter': 500, 'ftol': 1e-8}
+        options={'maxiter': 100, 'ftol': 1e-6, 'eps': 1e-4}
     )
 
     alpha, T_opt, P_opt = result.x
@@ -266,6 +276,15 @@ def run_bootstrap(
     alpha_samples = np.zeros(n_bootstrap)
     h_samples = np.zeros((n_bootstrap, 5))
 
+    # Storage for j and k samples (unconstrained only for now)
+    # Note: j has shape (n_countries,), k has shape (n_years,) for each bootstrap
+    # Since bootstrap resampling preserves n_countries but may vary n_years,
+    # we store j samples but k samples may have variable length
+    j0_samples = np.zeros((n_bootstrap, data.n_countries))
+    j1_samples = np.zeros((n_bootstrap, data.n_countries))
+    j2_samples = np.zeros((n_bootstrap, data.n_countries))
+    k_samples = np.zeros((n_bootstrap, data.n_years))
+
     # Constrained-specific storage
     T_opt_samples = np.zeros(n_bootstrap) if constrained else None
     P_opt_samples = np.zeros(n_bootstrap) if constrained else None
@@ -285,7 +304,7 @@ def run_bootstrap(
         print(f"  Resampling {data.n_countries} countries with replacement")
 
     for b in range(n_bootstrap):
-        if verbose and (b + 1) % 100 == 0:
+        if verbose and (b + 1) % 1 == 0:
             print(f"  Bootstrap iteration {b + 1}/{n_bootstrap}")
 
         # Sample countries with replacement
@@ -298,7 +317,10 @@ def run_bootstrap(
         try:
             if constrained:
                 alpha_b, T_opt_b, P_opt_b, h2_b, h4_b = fit_bootstrap_sample_constrained(
-                    boot_data, GDP0, T_bounds, P_bounds
+                    boot_data, GDP0, T_bounds, P_bounds,
+                    alpha_init=params.alpha,
+                    T_opt_init=T_opt_point,
+                    P_opt_init=P_opt_point,
                 )
                 # Convert to unconstrained h parameters for storage
                 h0_b, h1_b, _, h3_b, _ = constrained_to_unconstrained_h(
@@ -308,8 +330,29 @@ def run_bootstrap(
 
                 T_opt_samples[b] = T_opt_b
                 P_opt_samples[b] = P_opt_b
+
+                # j and k not stored for constrained model
+                j0_samples[b, :] = np.nan
+                j1_samples[b, :] = np.nan
+                j2_samples[b, :] = np.nan
+                k_samples[b, :] = np.nan
             else:
-                alpha_b, h_b = fit_bootstrap_sample(boot_data, GDP0, model_variant)
+                alpha_b, h_b, j0_b, j1_b, j2_b, k_b = fit_bootstrap_sample(
+                    boot_data, GDP0, model_variant
+                )
+
+                # Store j samples (same length as original n_countries)
+                j0_samples[b, :] = j0_b
+                j1_samples[b, :] = j1_b
+                j2_samples[b, :] = j2_b
+
+                # Store k samples (may be shorter if some years missing)
+                # Pad with NaN if necessary
+                if len(k_b) <= data.n_years:
+                    k_samples[b, :len(k_b)] = k_b
+                    k_samples[b, len(k_b):] = np.nan
+                else:
+                    k_samples[b, :] = k_b[:data.n_years]
 
             alpha_samples[b] = alpha_b
             h_samples[b, :] = h_b
@@ -320,6 +363,10 @@ def run_bootstrap(
                 print(f"  Warning: Bootstrap iteration {b} failed: {e}")
             alpha_samples[b] = np.nan
             h_samples[b, :] = np.nan
+            j0_samples[b, :] = np.nan
+            j1_samples[b, :] = np.nan
+            j2_samples[b, :] = np.nan
+            k_samples[b, :] = np.nan
             if constrained:
                 T_opt_samples[b] = np.nan
                 P_opt_samples[b] = np.nan
@@ -331,9 +378,15 @@ def run_bootstrap(
         params=params,
         alpha_samples=alpha_samples,
         h_samples=h_samples,
+        j0_samples=j0_samples,
+        j1_samples=j1_samples,
+        j2_samples=j2_samples,
+        k_samples=k_samples,
         n_bootstrap=n_bootstrap,
         n_successful=n_successful,
         model_variant=model_variant,
+        n_countries=data.n_countries,
+        n_years=data.n_years,
         constrained=constrained,
         T_opt_samples=T_opt_samples,
         P_opt_samples=P_opt_samples,

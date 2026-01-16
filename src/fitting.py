@@ -363,6 +363,8 @@ def fit_model(
         print(f"  AIC = {aic:.1f}, BIC = {bic:.1f}")
 
     # Compute standard errors
+    if verbose:
+        print(f"\nComputing standard errors via Hessian (this may take a while)...")
     params = compute_standard_errors(data, params, model_variant)
 
     return FitResult(
@@ -385,17 +387,18 @@ def fit_model(
 # Constrained model fitting: h(T*, P*) = 0
 # ============================================================================
 
-def build_constrained_design_matrix(
+def build_constrained_design_matrix_sparse(
     data: FittingData,
     g_values: np.ndarray,
     T_opt: float,
     P_opt: float,
-) -> np.ndarray:
-    """Build design matrix for constrained model with fixed T_opt, P_opt.
+):
+    """Build sparse design matrix for constrained model with fixed T_opt, P_opt.
 
     Model: y = g*h2*(T - T_opt)^2 + g*h4*(P - P_opt)^2 + j + k
 
-    Columns: g*(T-T_opt)^2, g*(P-P_opt)^2, j0[i], j1[i]*t, j2[i]*t^2, k[y>0]
+    Uses sparse representation for j and k columns (which are mostly zeros)
+    for much faster least squares solving.
 
     Args:
         data: FittingData object
@@ -404,38 +407,49 @@ def build_constrained_design_matrix(
         P_opt: Optimal precipitation
 
     Returns:
-        Design matrix X
+        Sparse CSR design matrix X
     """
+    from scipy import sparse
+
     n = data.n_obs
     n_countries = data.n_countries
     n_years = data.n_years
 
-    # h parameters: 2 columns for h2 and h4
+    # h parameters: 2 dense columns for h2 and h4
     X_h = np.column_stack([
         g_values * (data.temp - T_opt)**2,   # h2 column
         g_values * (data.precp - P_opt)**2,  # h4 column
     ])
 
-    # j parameters: 3 * n_countries columns (same as base model)
-    X_j = np.zeros((n, 3 * n_countries))
-    for obs_idx in range(n):
-        i = data.country_idx[obs_idx]
-        t = data.time[obs_idx]
-        X_j[obs_idx, i] = 1.0                     # j0[i]
-        X_j[obs_idx, n_countries + i] = t        # j1[i] * t
-        X_j[obs_idx, 2 * n_countries + i] = t**2  # j2[i] * t^2
+    # j parameters: 3 * n_countries sparse columns
+    row_idx = np.arange(n)
+    col_j0 = data.country_idx
+    col_j1 = n_countries + data.country_idx
+    col_j2 = 2 * n_countries + data.country_idx
+    data_j0 = np.ones(n)
+    data_j1 = data.time
+    data_j2 = data.time**2
 
-    # k parameters: n_years - 1 columns (drop k[0] for identifiability)
-    X_k = np.zeros((n, n_years - 1))
-    for obs_idx in range(n):
-        y = data.year_idx[obs_idx]
-        if y > 0:
-            X_k[obs_idx, y - 1] = 1.0
+    J_sparse = sparse.csr_matrix(
+        (np.concatenate([data_j0, data_j1, data_j2]),
+         (np.tile(row_idx, 3), np.concatenate([col_j0, col_j1, col_j2]))),
+        shape=(n, 3 * n_countries)
+    )
 
-    # Combine all columns
-    X = np.hstack([X_h, X_j, X_k])
+    # k parameters: n_years - 1 sparse columns (drop k[0])
+    mask = data.year_idx > 0
+    row_k = np.arange(n)[mask]
+    col_k = data.year_idx[mask] - 1
 
-    return X
+    K_sparse = sparse.csr_matrix(
+        (np.ones(len(row_k)), (row_k, col_k)),
+        shape=(n, n_years - 1)
+    )
+
+    # Combine: X_h (as sparse) | J_sparse | K_sparse
+    X_sparse = sparse.hstack([sparse.csr_matrix(X_h), J_sparse, K_sparse])
+
+    return X_sparse
 
 
 def solve_constrained_subproblem(
@@ -446,6 +460,8 @@ def solve_constrained_subproblem(
 ) -> Tuple[float, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Solve for h2, h4, j, k given fixed alpha, T_opt, P_opt.
 
+    Uses sparse LSQR for efficiency (design matrix is ~1% dense).
+
     Args:
         data: FittingData object
         g_values: Precomputed g(GDP) values
@@ -455,12 +471,15 @@ def solve_constrained_subproblem(
     Returns:
         h2, h4, j0, j1, j2, k
     """
-    from scipy import linalg
+    from scipy.sparse.linalg import lsqr
 
-    X = build_constrained_design_matrix(data, g_values, T_opt, P_opt)
+    X = build_constrained_design_matrix_sparse(data, g_values, T_opt, P_opt)
     y = data.growth_pcGDP
 
-    beta, residuals, rank, s = linalg.lstsq(X, y, cond=None, lapack_driver='gelsy')
+    # LSQR is an iterative solver efficient for sparse least squares
+    # Use tight tolerances to ensure consistent objective values
+    result = lsqr(X, y, atol=1e-14, btol=1e-14, iter_lim=10000)
+    beta = result[0]
 
     n_countries = data.n_countries
     n_years = data.n_years
@@ -575,7 +594,7 @@ def fit_model_constrained(
     def tracked_objective(params):
         obj = objective_constrained(params, GDP0, data)
         eval_history.append((params.copy(), obj))
-        if verbose and len(eval_history) % 50 == 0:
+        if verbose and len(eval_history) % 1 == 0:
             print(f"    Iteration {len(eval_history)}: "
                   f"alpha={params[0]:.6f}, T*={params[1]:.2f}, P*={params[2]:.2f}, "
                   f"obj={obj:.6f}")
@@ -584,12 +603,14 @@ def fit_model_constrained(
     if verbose:
         print(f"\n  Optimizing with L-BFGS-B...")
 
+    # Use L-BFGS-B with moderate eps for finite-difference gradients
+    # The sparse solver is fast enough that this works well
     result = optimize.minimize(
         tracked_objective,
         x0=x0,
         method='L-BFGS-B',
         bounds=bounds,
-        options={'maxiter': 1000, 'ftol': 1e-10}
+        options={'maxiter': 200, 'ftol': 1e-8, 'eps': 1e-3}
     )
 
     alpha, T_opt, P_opt = result.x

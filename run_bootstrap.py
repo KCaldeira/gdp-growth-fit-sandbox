@@ -399,31 +399,36 @@ def save_bootstrap_coefficients(
     bootstrap_result: BootstrapResult,
     output_dir: Path,
 ) -> None:
-    """Save all bootstrap coefficient samples to CSV."""
+    """Save bootstrap coefficient samples to two CSV files.
+
+    Creates:
+    - bootstrap_coefficients_simple.csv: alpha, h0, h1, h2, h3, h4
+    - bootstrap_coefficients_complete.csv: all parameters including j and k
+    """
     valid_mask = ~np.isnan(bootstrap_result.alpha_samples)
     alpha_samples = bootstrap_result.alpha_samples[valid_mask]
     h_samples = bootstrap_result.h_samples[valid_mask]
 
+    # Simple CSV: just alpha and h parameters
     if bootstrap_result.constrained:
         # Constrained model: include T_opt and P_opt
         T_opt_samples = bootstrap_result.T_opt_samples[valid_mask]
         P_opt_samples = bootstrap_result.P_opt_samples[valid_mask]
 
-        df = pd.DataFrame({
+        df_simple = pd.DataFrame({
             'iteration': np.arange(1, len(alpha_samples) + 1),
             'alpha': alpha_samples,
             'T_opt': T_opt_samples,
             'P_opt': P_opt_samples,
-            'h2': h_samples[:, 2],
-            'h4': h_samples[:, 4],
-            # Derived unconstrained parameters
             'h0': h_samples[:, 0],
             'h1': h_samples[:, 1],
+            'h2': h_samples[:, 2],
             'h3': h_samples[:, 3],
+            'h4': h_samples[:, 4],
         })
     else:
         # Unconstrained model
-        df = pd.DataFrame({
+        df_simple = pd.DataFrame({
             'iteration': np.arange(1, len(alpha_samples) + 1),
             'alpha': alpha_samples,
             'h0': h_samples[:, 0],
@@ -432,12 +437,52 @@ def save_bootstrap_coefficients(
             'h3': h_samples[:, 3],
             'h4': h_samples[:, 4],
         })
-        # Compute derived optimal temperature
-        df['T_optimal'] = -df['h1'] / (2 * df['h2'])
 
-    csv_path = output_dir / "bootstrap_coefficients.csv"
-    df.to_csv(csv_path, index=False)
-    print(f"  Saved: bootstrap_coefficients.csv ({len(df)} samples)")
+    csv_simple_path = output_dir / "bootstrap_coefficients_simple.csv"
+    df_simple.to_csv(csv_simple_path, index=False)
+    print(f"  Saved: bootstrap_coefficients_simple.csv ({len(df_simple)} samples)")
+
+    # Complete CSV: include j and k parameters
+    if not bootstrap_result.constrained:
+        j0_samples = bootstrap_result.j0_samples[valid_mask]
+        j1_samples = bootstrap_result.j1_samples[valid_mask]
+        j2_samples = bootstrap_result.j2_samples[valid_mask]
+        k_samples = bootstrap_result.k_samples[valid_mask]
+
+        # Build complete dataframe with j and k columns
+        data_dict = {
+            'iteration': np.arange(1, len(alpha_samples) + 1),
+            'alpha': alpha_samples,
+            'h0': h_samples[:, 0],
+            'h1': h_samples[:, 1],
+            'h2': h_samples[:, 2],
+            'h3': h_samples[:, 3],
+            'h4': h_samples[:, 4],
+        }
+
+        # Add j0 columns (one per country)
+        for i in range(bootstrap_result.n_countries):
+            data_dict[f'j0_{i}'] = j0_samples[:, i]
+
+        # Add j1 columns (one per country)
+        for i in range(bootstrap_result.n_countries):
+            data_dict[f'j1_{i}'] = j1_samples[:, i]
+
+        # Add j2 columns (one per country)
+        for i in range(bootstrap_result.n_countries):
+            data_dict[f'j2_{i}'] = j2_samples[:, i]
+
+        # Add k columns (one per year)
+        for i in range(bootstrap_result.n_years):
+            data_dict[f'k_{i}'] = k_samples[:, i]
+
+        df_complete = pd.DataFrame(data_dict)
+        csv_complete_path = output_dir / "bootstrap_coefficients_complete.csv"
+        df_complete.to_csv(csv_complete_path, index=False)
+        print(f"  Saved: bootstrap_coefficients_complete.csv ({len(df_complete)} samples, "
+              f"{bootstrap_result.n_countries} countries, {bootstrap_result.n_years} years)")
+    else:
+        print("  Note: Complete CSV not saved for constrained model (j/k not tracked)")
 
 
 def save_bootstrap_summary(
