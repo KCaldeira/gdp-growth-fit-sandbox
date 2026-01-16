@@ -380,6 +380,73 @@ def save_climate_response_plots(result: FitResult, data: FittingData,
     plt.close()
 
 
+def save_temperature_derivative_plot(result: FitResult, data: FittingData,
+                                      output_dir: Path) -> None:
+    """Generate plot of dh/dT (temperature derivative of climate response) with uncertainty.
+
+    The derivative is: dh/dT = h1 + 2*h2*T
+
+    This shows how the marginal effect of temperature on growth changes with temperature.
+    """
+    params = result.params
+
+    # Temperature range from data
+    T_min, T_max = data.temp.min(), data.temp.max()
+    T_range = np.linspace(T_min, T_max, 100)
+
+    # Compute dh/dT = h1 + 2*h2*T
+    dh_dT = params.h1 + 2 * params.h2 * T_range
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Main line
+    ax.plot(T_range, dh_dT, 'b-', linewidth=2, label='Estimate')
+
+    # Uncertainty propagation: Var(dh/dT) = Var(h1) + (2*T)^2 * Var(h2)
+    # Assuming independence (this is approximate; full covariance would be better)
+    if params.se_h1 is not None and params.se_h2 is not None:
+        var_dh_dT = params.se_h1**2 + (2 * T_range)**2 * params.se_h2**2
+        se_dh_dT = np.sqrt(var_dh_dT)
+
+        ax.fill_between(T_range,
+                        dh_dT - 1.96 * se_dh_dT,
+                        dh_dT + 1.96 * se_dh_dT,
+                        alpha=0.3, color='blue', label='95% CI')
+
+    # Mark zero line
+    ax.axhline(y=0, color='gray', linestyle='--', linewidth=1)
+
+    # Mark optimal temperature (where dh/dT = 0)
+    if params.h2 != 0:
+        T_opt = -params.h1 / (2 * params.h2)
+        if T_min <= T_opt <= T_max:
+            ax.axvline(x=T_opt, color='red', linestyle=':', linewidth=2,
+                       label=f'Optimal T = {T_opt:.1f}°C')
+
+            # Add uncertainty band for optimal temperature if we have SEs
+            if params.se_h1 is not None and params.se_h2 is not None:
+                # Using delta method: Var(T_opt) ≈ (∂T_opt/∂h1)^2 * Var(h1) + (∂T_opt/∂h2)^2 * Var(h2)
+                # T_opt = -h1/(2*h2), so ∂T_opt/∂h1 = -1/(2*h2), ∂T_opt/∂h2 = h1/(2*h2^2)
+                dTopt_dh1 = -1 / (2 * params.h2)
+                dTopt_dh2 = params.h1 / (2 * params.h2**2)
+                var_T_opt = dTopt_dh1**2 * params.se_h1**2 + dTopt_dh2**2 * params.se_h2**2
+                se_T_opt = np.sqrt(var_T_opt)
+
+                ax.axvspan(T_opt - 1.96 * se_T_opt, T_opt + 1.96 * se_T_opt,
+                           alpha=0.2, color='red',
+                           label=f'95% CI: {T_opt - 1.96*se_T_opt:.1f} to {T_opt + 1.96*se_T_opt:.1f}°C')
+
+    ax.set_xlabel('Temperature (°C)')
+    ax.set_ylabel('dh/dT (Marginal Effect of Temperature)')
+    ax.set_title('Temperature Derivative of Climate Response\ndh/dT = h1 + 2·h2·T')
+    ax.legend(loc='best')
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_dir / "temperature_derivative.png", dpi=150)
+    plt.close()
+
+
 def save_optimization_results(result: FitResult, data: FittingData,
                               output_dir: Path) -> None:
     """Save alpha optimization results (plot and CSV) if available."""
@@ -435,6 +502,7 @@ def save_all_outputs(result: FitResult, data: FittingData,
     save_diagnostic_plots(result, data, output_dir)
     save_residuals(result, data, output_dir)
     save_climate_response_plots(result, data, output_dir)
+    save_temperature_derivative_plot(result, data, output_dir)
     save_optimization_results(result, data, output_dir)
 
     print("  - global_params.json")
@@ -447,6 +515,7 @@ def save_all_outputs(result: FitResult, data: FittingData,
     print("  - residuals.csv")
     print("  - climate_response_vs_gdp.png")
     print("  - climate_response_surface.png")
+    print("  - temperature_derivative.png")
     if result.grid_search_alphas is not None:
         print("  - alpha_optimization.png")
         print("  - alpha_optimization.csv")

@@ -31,8 +31,9 @@ class FittingData:
     n_years: int
 
     # Derived values
-    pop_weighted_mean_gdp: float  # Population-weighted mean of pcGDP (most recent year)
-    gdp0_reference_year: int      # Year used for GDP0 calculation
+    pop_weighted_mean_gdp: float     # Population-weighted mean of pcGDP (most recent year)
+    pop_weighted_mean_precp: float   # Population-weighted mean of log-precipitation (most recent year)
+    gdp0_reference_year: int         # Year used for GDP0 and P0 calculation
 
 
 def load_data(csv_path: str) -> FittingData:
@@ -68,12 +69,14 @@ def load_data(csv_path: str) -> FittingData:
     country_idx = df['iso_id'].map(iso_to_idx).values.astype(np.int32)
     year_idx = df['year'].map(year_to_idx).values.astype(np.int32)
 
-    # Compute population-weighted mean GDP for the most recent year
+    # Compute population-weighted means for the most recent year
     most_recent_year = max(unique_years)
     recent_mask = df['year'] == most_recent_year
     recent_gdp = df.loc[recent_mask, 'pcGDP'].values
+    recent_precp = df.loc[recent_mask, 'precp'].values
     recent_pop = df.loc[recent_mask, 'Pop'].values
     pop_weighted_mean_gdp = np.sum(recent_gdp * recent_pop) / np.sum(recent_pop)
+    pop_weighted_mean_precp = np.sum(recent_precp * recent_pop) / np.sum(recent_pop)
 
     return FittingData(
         growth_pcGDP=growth_pcGDP,
@@ -92,5 +95,6 @@ def load_data(csv_path: str) -> FittingData:
         n_countries=len(unique_countries),
         n_years=len(unique_years),
         pop_weighted_mean_gdp=pop_weighted_mean_gdp,
+        pop_weighted_mean_precp=pop_weighted_mean_precp,
         gdp0_reference_year=most_recent_year,
     )

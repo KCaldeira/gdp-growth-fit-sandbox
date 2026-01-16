@@ -1,24 +1,34 @@
 # GDP Growth Fit Sandbox
 
-A project for testing non-linear curve fitting algorithms on GDP, temperature, and precipitation data.
+A project for fitting non-linear models relating economic growth to GDP levels and climate variables (temperature and precipitation), with country-specific trends and year fixed effects. Based on Burke, Hsiang & Miguel (2015) methodology.
 
-## Project Overview
+## Current Status
 
-This project fits a non-linear model relating economic growth to GDP levels and climate variables (temperature and precipitation), with country-specific trends and year fixed effects.
+The project now supports:
+- **Three model variants** with different assumptions about how GDP scaling affects components
+- **Cluster bootstrap uncertainty analysis** (resampling countries with replacement)
+- **Monte Carlo-based confidence intervals** that don't assume normality of errors
+- **Hessian-based standard errors** (assuming normality) for comparison
 
 ## Model Specification
 
-The model to be fitted is:
+### Base Model (default)
 
 ```
 growth_pcGDP(i,t) = g(pcGDP[i,t]) * h(T[i,t], P[i,t]) + j(i,t) + k(t)
 ```
 
-Where:
-- `i` = country index (integer mapping of iso_id)
-- `t` = year
-- `T` = temperature (temp)
-- `P` = log(precipitation) = precp (already log-transformed in input data)
+### Alternative Model Variants
+
+Two alternative specifications are available via the `--model-variant` flag:
+
+| Variant | Equation | Description |
+|---------|----------|-------------|
+| `base` | `g*h + j + k` | GDP scaling applies only to climate response |
+| `g_scales_hj` | `g*(h + j) + k` | GDP scaling applies to climate + country trends |
+| `g_scales_all` | `g*(h + j + k)` | GDP scaling applies to everything |
+
+For `g_scales_hj` and `g_scales_all`, h0 is absorbed into j0 (4 h parameters instead of 5).
 
 ### Component Functions
 
@@ -26,87 +36,41 @@ Where:
 ```
 g(GDP) = (GDP / GDP0)^(-alpha)
 ```
-- `GDP0` is **fixed** to the population-weighted mean GDP for the most recent year in the data
-- `alpha` is estimated, constrained to [0, 1]
+- `GDP0` is **fixed** to the population-weighted mean GDP for the most recent year
+- `alpha` is estimated, constrained to [0.01, 0.99]
 
 **h(T, P)** - Climate response function:
 ```
 h(T, P) = h0 + h1*T + h2*T^2 + h3*P + h4*P^2
 ```
-Parameters: `h0`, `h1`, `h2`, `h3`, `h4`
+Parameters: `h0`, `h1`, `h2`, `h3`, `h4` (h0 omitted for non-base variants)
 
 **j(i, t)** - Country-specific time trends:
 ```
 j(i, t) = j0[i] + j1[i]*t + j2[i]*t^2
 ```
-Parameters: `j0[i]`, `j1[i]`, `j2[i]` for each country i
 
 **k(t)** - Year fixed effects:
 ```
-k(t) = k[t]
+k(t) = k[t]   (with k[first_year] = 0 for identifiability)
 ```
-Parameters: `k[t]` for each year t (with k[first_year] = 0 for identifiability)
 
-## Fitting Algorithm
+## Uncertainty Analysis
 
-Uses **profile likelihood optimization** to handle the non-linear structure:
+### Cluster Bootstrap (Recommended)
 
-1. **Brent's method** searches for optimal alpha in [0.01, 0.99]
-2. For each candidate alpha, solve the **full linear least squares** problem for h, j, k
-3. The objective function (sum of squared residuals) is evaluated exactly for each alpha
+The cluster bootstrap resamples **countries with replacement**, preserving within-country correlation across years. This approach:
+- Does not assume normality of errors
+- Captures the full parameter correlation structure
+- Provides percentile-based confidence intervals
 
-This approach evaluates the true objective for each alpha candidate, ensuring reliable convergence. GDP0 is fixed to the population-weighted mean GDP for the most recent year.
-
-## Standard Error Estimation
-
-Standard errors are computed via the **numerical Hessian of the negative log-likelihood** at the converged solution:
-
-1. All estimated parameters (alpha, h0-h4, j's, k's) are packed into a single vector
-2. The Hessian matrix of the negative log-likelihood is computed using finite differences
-3. The covariance matrix is obtained by inverting the Hessian: `Cov = inv(Hessian)`
-4. Standard errors are the square roots of the diagonal: `SE[i] = sqrt(Cov[i,i])`
-
-**Key properties:**
-- **GDP0 is excluded** from the Hessian computation since it is a fixed known value, not an estimated parameter
-- The **full joint Hessian** is computed over all 578 estimated parameters (1 alpha + 5 h's + 510 j's + 62 k's)
-- Standard errors for each parameter **account for correlations with all other parameters**, including alpha
-- This means the uncertainty in h0-h4 reflects uncertainty in alpha (and vice versa)
-
-The negative log-likelihood (assuming Gaussian errors) is:
+```bash
+python run_bootstrap.py --n-bootstrap 1000 --model-variant base
 ```
--log L = (n/2) * log(SSR/n) + constant
-```
-where SSR is the sum of squared residuals.
 
-## Data
+### Hessian-Based Standard Errors
 
-Input data is stored in `./data/input/` and contains:
-- **iso_id**: Country ISO code
-- **year**: Year of observation
-- **pcGDP**: Per capita GDP
-- **growth_pcGDP**: Growth rate of per capita GDP
-- **temp**: Temperature
-- **precp**: Log precipitation (already transformed)
-- **time/time2**: Time indices for trend analysis
-- **Pop**: Population
-
-## Output
-
-Results from each test run are saved to timestamped subdirectories in `./data/output/`.
-
-### Output Files
-- `global_params.json` - GDP0, alpha, h0-h4 with standard errors
-- `country_params.csv` - j0, j1, j2 for each country
-- `year_effects.csv` - k[t] for each year
-- `summary.json/txt` - Fit statistics (R², RMSE, AIC, BIC)
-- `diagnostics.png` - Residual diagnostic plots
-- `convergence.png` - Optimization convergence history
-- `year_effects.png` - Year fixed effects with 95% CI
-- `climate_response_vs_gdp.png` - Climate response scaling with GDP (with uncertainty)
-- `climate_response_surface.png` - h(T,P) response surface at GDP0
-- `residuals.csv` - Fitted values and residuals
-- `alpha_optimization.csv` - Optimization evaluations (alpha vs objective)
-- `alpha_optimization.png` - Optimization path visualization
+Also computed automatically via numerical Hessian of the negative log-likelihood. These assume Gaussian errors but account for correlations between all parameters.
 
 ## Installation
 
@@ -118,37 +82,110 @@ pip install -r requirements.txt
 
 ## Usage
 
+### Bootstrap Uncertainty Analysis
+
 ```bash
-# Run with default settings
-python scripts/run_fit.py
+# Run with defaults (1000 bootstrap iterations, base model)
+python run_bootstrap.py
 
-# Specify output directory
-python scripts/run_fit.py --output data/output/my_test
+# Specify model variant and iterations
+python run_bootstrap.py --model-variant g_scales_hj --n-bootstrap 500
 
-# Quiet mode (suppress progress output)
-python scripts/run_fit.py --quiet
+# Full options
+python run_bootstrap.py \
+  --n-bootstrap 1000 \
+  --seed 42 \
+  --model-variant base \
+  --output-dir ./data/output/my_analysis \
+  --data-file data/input/df_base_withPop.csv
 ```
 
-### Command Line Options
-- `--input, -i`: Path to input CSV file (default: data/input/df_base_withPop.csv)
-- `--output, -o`: Output directory (default: timestamped subdirectory)
-- `--quiet, -q`: Suppress progress output
+### Command Line Options (run_bootstrap.py)
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--n-bootstrap` | 1000 | Number of bootstrap iterations |
+| `--seed` | 42 | Random seed for reproducibility |
+| `--model-variant` | base | Model variant: base, g_scales_hj, g_scales_all |
+| `--output-dir` | auto | Output directory (default: ./data/output/bootstrap_{timestamp}) |
+| `--data-file` | data/input/df_base_withPop.csv | Input data file |
+
+## Output Files
+
+### Bootstrap Analysis Output
+
+```
+data/output/bootstrap_{timestamp}/
+├── bootstrap_coefficients.csv    # All Monte Carlo samples (alpha, h1-h4, T_optimal)
+├── bootstrap_summary.txt         # Summary statistics with 95% CIs
+├── bootstrap_h_temperature.png   # h(T) with bootstrap 95% CI
+├── bootstrap_g_gdp.png          # g(GDP) with bootstrap 95% CI
+├── bootstrap_gh_combined.png    # g(GDP)*h(T) for multiple GDP levels
+├── bootstrap_dhdT.png           # Marginal effect dh/dT with CI
+├── bootstrap_alpha.png          # Bootstrap distribution of α
+└── bootstrap_optimal_temperature.png  # Distribution of optimal T*
+```
+
+### Standard Fit Output (via run_fit.py)
+
+```
+data/output/{timestamp}/
+├── global_params.json           # GDP0, alpha, h0-h4 with Hessian SEs
+├── country_params.csv           # j0, j1, j2 for each country
+├── year_effects.csv             # k[t] for each year
+├── summary.json/txt             # Fit statistics (R², RMSE, AIC, BIC)
+├── diagnostics.png              # Residual diagnostic plots
+├── climate_response_*.png       # Climate response visualizations
+└── residuals.csv                # Fitted values and residuals
+```
 
 ## Project Structure
 
 ```
 gdp-growth-fit-sandbox/
 ├── data/
-│   ├── input/              # Source CSV data
-│   └── output/             # Timestamped test results
+│   ├── input/                   # Source CSV data (DO NOT MODIFY)
+│   └── output/                  # Timestamped results
 ├── src/
 │   ├── __init__.py
-│   ├── data_loader.py      # Load CSV, create mappings
-│   ├── model.py            # Model component functions
-│   ├── fitting.py          # Profile likelihood optimization
-│   └── output.py           # Save results and plots
+│   ├── data_loader.py           # Load CSV, compute population-weighted means
+│   ├── model.py                 # Model component functions (g, h, j, k)
+│   ├── fitting.py               # Profile likelihood optimization + model variants
+│   ├── bootstrap.py             # Cluster bootstrap uncertainty analysis
+│   └── output.py                # Save results and diagnostic plots
 ├── scripts/
-│   └── run_fit.py          # Main entry point
+│   └── run_fit.py               # Basic fitting entry point
+├── run_bootstrap.py             # Bootstrap analysis entry point
 ├── requirements.txt
+├── CLAUDE.md                    # Coding style guide
 └── README.md
 ```
+
+## Fitting Algorithm
+
+Uses **profile likelihood optimization**:
+
+1. **Brent's method** searches for optimal α in [0.01, 0.99]
+2. For each candidate α, solve the **full linear least squares** for h, j, k
+3. The objective (sum of squared residuals) is evaluated exactly
+
+This ensures reliable convergence by always evaluating the true objective.
+
+## Reference Values
+
+Following Burke et al. methodology:
+- **GDP0**: Population-weighted mean per capita GDP (most recent year)
+- **P_const**: Population-weighted mean log-precipitation (for plotting h(T) curves)
+- **Temperature range**: 0°C to 30°C (standard for climate-growth plots)
+
+## Data
+
+Input CSV columns:
+- `iso_id`: Country ISO code
+- `year`: Year of observation
+- `pcGDP`: Per capita GDP
+- `growth_pcGDP`: Growth rate (target variable)
+- `temp`: Temperature (°C)
+- `precp`: Log precipitation (already transformed)
+- `time`: Time index for trends
+- `Pop`: Population

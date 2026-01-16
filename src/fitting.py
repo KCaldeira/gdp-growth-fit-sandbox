@@ -7,6 +7,11 @@ We use profile likelihood optimization:
 3. Minimize over alpha using grid search + Brent's method
 4. GDP0 is fixed to population-weighted mean GDP
 
+Three model variants are supported:
+- "base":         growth = g*h + j + k           (5 h params: h0, h1, h2, h3, h4)
+- "g_scales_hj":  growth = g*(h + j) + k         (4 h params: h1, h2, h3, h4; h0 absorbed into j0)
+- "g_scales_all": growth = g*(h + j + k)         (4 h params: h1, h2, h3, h4; h0 absorbed into j0)
+
 This approach is superior to alternating estimation because it always
 evaluates the true objective for each alpha candidate.
 """
@@ -22,6 +27,10 @@ from .model import ModelParams, g_func, h_func, j_func, k_func, predict_from_dat
 from .data_loader import FittingData
 
 
+# Valid model variants
+MODEL_VARIANTS = ["base", "g_scales_hj", "g_scales_all"]
+
+
 @dataclass
 class FitResult:
     """Container for fitting results."""
@@ -34,53 +43,74 @@ class FitResult:
     n_iterations: int
     converged: bool
     objective_history: list
+    model_variant: str  # "base", "g_scales_hj", or "g_scales_all"
     # Grid search results (if performed)
     grid_search_alphas: Optional[np.ndarray] = None
     grid_search_objectives: Optional[np.ndarray] = None
 
 
-def build_linear_design_matrix(data: FittingData, g_values: np.ndarray) -> np.ndarray:
+def build_linear_design_matrix(
+    data: FittingData,
+    g_values: np.ndarray,
+    model_variant: str,
+) -> np.ndarray:
     """Build design matrix for linear subproblem given fixed g values.
 
-    The linear model is:
-        y = g*h0 + g*h1*T + g*h2*T^2 + g*h3*P + g*h4*P^2
-            + j0[i] + j1[i]*t + j2[i]*t^2 + k[t]
+    Model variants:
+        "base":         y = g*h0 + g*h1*T + g*h2*T^2 + g*h3*P + g*h4*P^2 + j + k
+        "g_scales_hj":  y = g*h1*T + g*h2*T^2 + g*h3*P + g*h4*P^2 + g*j + k
+        "g_scales_all": y = g*h1*T + g*h2*T^2 + g*h3*P + g*h4*P^2 + g*j + g*k
 
+    For g_scales_hj and g_scales_all, h0 is absorbed into j0.
     We drop k[0] = 0 for identifiability (first year is reference).
 
-    Returns design matrix X and mapping info.
+    Returns design matrix X.
     """
     n = data.n_obs
     n_countries = data.n_countries
     n_years = data.n_years
 
-    # h parameters: 5 columns
-    # Columns: g, g*T, g*T^2, g*P, g*P^2
-    X_h = np.column_stack([
-        g_values,
-        g_values * data.temp,
-        g_values * data.temp**2,
-        g_values * data.precp,
-        g_values * data.precp**2,
-    ])
+    # h parameters
+    if model_variant == "base":
+        # 5 columns: g, g*T, g*T^2, g*P, g*P^2
+        X_h = np.column_stack([
+            g_values,
+            g_values * data.temp,
+            g_values * data.temp**2,
+            g_values * data.precp,
+            g_values * data.precp**2,
+        ])
+    else:
+        # 4 columns: g*T, g*T^2, g*P, g*P^2 (no h0)
+        X_h = np.column_stack([
+            g_values * data.temp,
+            g_values * data.temp**2,
+            g_values * data.precp,
+            g_values * data.precp**2,
+        ])
 
     # j parameters: 3 * n_countries columns
-    # For each country i: indicator, indicator*t, indicator*t^2
+    # For model variants, j may be scaled by g
+    scale_j = g_values if model_variant in ["g_scales_hj", "g_scales_all"] else np.ones(n)
+
     X_j = np.zeros((n, 3 * n_countries))
     for obs_idx in range(n):
         i = data.country_idx[obs_idx]
         t = data.time[obs_idx]
-        X_j[obs_idx, i] = 1.0                    # j0[i]
-        X_j[obs_idx, n_countries + i] = t       # j1[i]
-        X_j[obs_idx, 2 * n_countries + i] = t**2  # j2[i]
+        s = scale_j[obs_idx]
+        X_j[obs_idx, i] = s                      # j0[i] (possibly scaled by g)
+        X_j[obs_idx, n_countries + i] = s * t    # j1[i] * t
+        X_j[obs_idx, 2 * n_countries + i] = s * t**2  # j2[i] * t^2
 
     # k parameters: n_years - 1 columns (drop k[0] for identifiability)
-    # For year index y > 0: indicator
+    # For g_scales_all, k is scaled by g
+    scale_k = g_values if model_variant == "g_scales_all" else np.ones(n)
+
     X_k = np.zeros((n, n_years - 1))
     for obs_idx in range(n):
         y = data.year_idx[obs_idx]
         if y > 0:
-            X_k[obs_idx, y - 1] = 1.0
+            X_k[obs_idx, y - 1] = scale_k[obs_idx]
 
     # Combine all columns
     X = np.hstack([X_h, X_j, X_k])
@@ -88,38 +118,45 @@ def build_linear_design_matrix(data: FittingData, g_values: np.ndarray) -> np.nd
     return X
 
 
-def solve_linear_subproblem(data: FittingData, g_values: np.ndarray
-                            ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def solve_linear_subproblem(
+    data: FittingData,
+    g_values: np.ndarray,
+    model_variant: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Solve for h, j, k parameters given fixed g values.
 
     Uses ordinary least squares.
 
     Returns:
-        h_params: array of shape (5,) for h0, h1, h2, h3, h4
+        h_params: array of shape (5,) for base, (4,) for other variants
+                  For non-base variants, h0 is set to 0.0 and h_params = [0, h1, h2, h3, h4]
         j0, j1, j2: arrays of shape (n_countries,)
         k: array of shape (n_years,) with k[0] = 0
     """
-    X = build_linear_design_matrix(data, g_values)
+    from scipy import linalg
+
+    X = build_linear_design_matrix(data, g_values, model_variant)
     y = data.growth_pcGDP
 
-    # Solve least squares: X @ beta = y
-    # Use scipy.linalg.lstsq which is more robust than numpy
-    from scipy import linalg
     beta, residuals, rank, s = linalg.lstsq(X, y, cond=None, lapack_driver='gelsy')
 
-    # Extract parameters
     n_countries = data.n_countries
     n_years = data.n_years
 
-    h_params = beta[:5]
+    if model_variant == "base":
+        n_h = 5
+        h_params = beta[:5]
+    else:
+        n_h = 4
+        # Return h_params as [0, h1, h2, h3, h4] for consistency
+        h_params = np.concatenate([[0.0], beta[:4]])
 
-    j0 = beta[5:5 + n_countries]
-    j1 = beta[5 + n_countries:5 + 2 * n_countries]
-    j2 = beta[5 + 2 * n_countries:5 + 3 * n_countries]
+    j0 = beta[n_h:n_h + n_countries]
+    j1 = beta[n_h + n_countries:n_h + 2 * n_countries]
+    j2 = beta[n_h + 2 * n_countries:n_h + 3 * n_countries]
 
-    # k with k[0] = 0
     k = np.zeros(n_years)
-    k[1:] = beta[5 + 3 * n_countries:]
+    k[1:] = beta[n_h + 3 * n_countries:]
 
     return h_params, j0, j1, j2, k
 
@@ -154,7 +191,41 @@ def objective_alpha_only(alpha: float, GDP0: float, data: FittingData,
     return np.sum(residuals**2)
 
 
-def objective_for_alpha(alpha: float, GDP0: float, data: FittingData) -> float:
+def compute_predictions(
+    data: FittingData,
+    g_values: np.ndarray,
+    h_params: np.ndarray,
+    j0: np.ndarray,
+    j1: np.ndarray,
+    j2: np.ndarray,
+    k: np.ndarray,
+    model_variant: str,
+) -> np.ndarray:
+    """Compute predictions for a given model variant.
+
+    Model variants:
+        "base":         pred = g*h + j + k
+        "g_scales_hj":  pred = g*(h + j) + k
+        "g_scales_all": pred = g*(h + j + k)
+    """
+    h_vals = h_func(data.temp, data.precp, *h_params)
+    j_vals = j_func(data.country_idx, data.time, j0, j1, j2)
+    k_vals = k_func(data.year_idx, k)
+
+    if model_variant == "base":
+        return g_values * h_vals + j_vals + k_vals
+    elif model_variant == "g_scales_hj":
+        return g_values * (h_vals + j_vals) + k_vals
+    else:  # g_scales_all
+        return g_values * (h_vals + j_vals + k_vals)
+
+
+def objective_for_alpha(
+    alpha: float,
+    GDP0: float,
+    data: FittingData,
+    model_variant: str,
+) -> float:
     """Compute the best possible objective for a given alpha.
 
     This solves the full linear subproblem for h, j, k given alpha,
@@ -164,20 +235,19 @@ def objective_for_alpha(alpha: float, GDP0: float, data: FittingData) -> float:
         return 1e20
 
     g_values = g_func(data.pcGDP, GDP0, alpha)
-    h_params, j0, j1, j2, k = solve_linear_subproblem(data, g_values)
+    h_params, j0, j1, j2, k = solve_linear_subproblem(data, g_values, model_variant)
 
-    # Compute predictions and residuals
-    h_vals = h_func(data.temp, data.precp, *h_params)
-    j_vals = j_func(data.country_idx, data.time, j0, j1, j2)
-    k_vals = k_func(data.year_idx, k)
-
-    pred = g_values * h_vals + j_vals + k_vals
+    pred = compute_predictions(data, g_values, h_params, j0, j1, j2, k, model_variant)
     residuals = data.growth_pcGDP - pred
 
     return np.sum(residuals**2)
 
 
-def fit_model(data: FittingData, verbose: bool = True) -> FitResult:
+def fit_model(
+    data: FittingData,
+    model_variant: str,
+    verbose: bool,
+) -> FitResult:
     """Fit the full model by optimizing alpha with linear subproblem solved exactly.
 
     For each candidate alpha, we solve the full linear least squares problem
@@ -188,6 +258,7 @@ def fit_model(data: FittingData, verbose: bool = True) -> FitResult:
 
     Args:
         data: FittingData object
+        model_variant: One of "base", "g_scales_hj", or "g_scales_all"
         verbose: Print progress
 
     Returns:
@@ -196,8 +267,16 @@ def fit_model(data: FittingData, verbose: bool = True) -> FitResult:
     # GDP0 is fixed to population-weighted mean GDP
     GDP0 = data.pop_weighted_mean_gdp
 
+    # Model variant descriptions
+    variant_desc = {
+        "base": "g*h + j + k",
+        "g_scales_hj": "g*(h + j) + k",
+        "g_scales_all": "g*(h + j + k)",
+    }
+
     if verbose:
         print(f"Fitting model...")
+        print(f"  Model variant: {model_variant} [{variant_desc[model_variant]}]")
         print(f"  N={data.n_obs}, countries={data.n_countries}, years={data.n_years}")
         print(f"  GDP0 (fixed) = {GDP0:.2f} (pop-weighted mean GDP, {data.gdp0_reference_year})")
 
@@ -209,7 +288,7 @@ def fit_model(data: FittingData, verbose: bool = True) -> FitResult:
     eval_history = []
 
     def tracked_objective(alpha):
-        obj = objective_for_alpha(alpha, GDP0, data)
+        obj = objective_for_alpha(alpha, GDP0, data, model_variant)
         eval_history.append((alpha, obj))
         if verbose:
             print(f"    alpha={alpha:.8f}: obj={obj:.8f}")
@@ -243,7 +322,7 @@ def fit_model(data: FittingData, verbose: bool = True) -> FitResult:
 
     # Final solve for linear parameters with converged alpha
     g_values = g_func(data.pcGDP, GDP0, alpha)
-    h_params, j0, j1, j2, k = solve_linear_subproblem(data, g_values)
+    h_params, j0, j1, j2, k = solve_linear_subproblem(data, g_values, model_variant)
 
     # Compute final predictions and residuals
     params = ModelParams(
@@ -253,7 +332,7 @@ def fit_model(data: FittingData, verbose: bool = True) -> FitResult:
         j0=j0, j1=j1, j2=j2, k=k,
     )
 
-    predictions = predict_from_data(data, params)
+    predictions = compute_predictions(data, g_values, h_params, j0, j1, j2, k, model_variant)
     residuals = data.growth_pcGDP - predictions
 
     # Compute fit statistics
@@ -263,8 +342,9 @@ def fit_model(data: FittingData, verbose: bool = True) -> FitResult:
     rmse = np.sqrt(ss_res / data.n_obs)
 
     # AIC/BIC (assuming Gaussian errors)
-    # 1 (alpha) + 5 (h params) + 3*n_countries (j params) + (n_years - 1) (k params)
-    n_params = 1 + 5 + 3 * data.n_countries + (data.n_years - 1)
+    # For non-base variants, h0 is absorbed so we have 4 h params instead of 5
+    n_h_params = 5 if model_variant == "base" else 4
+    n_params = 1 + n_h_params + 3 * data.n_countries + (data.n_years - 1)
     log_likelihood = -data.n_obs / 2 * (np.log(2 * np.pi * ss_res / data.n_obs) + 1)
     aic = 2 * n_params - 2 * log_likelihood
     bic = np.log(data.n_obs) * n_params - 2 * log_likelihood
@@ -276,7 +356,7 @@ def fit_model(data: FittingData, verbose: bool = True) -> FitResult:
         print(f"  AIC = {aic:.1f}, BIC = {bic:.1f}")
 
     # Compute standard errors
-    params = compute_standard_errors(data, params)
+    params = compute_standard_errors(data, params, model_variant)
 
     return FitResult(
         params=params,
@@ -285,59 +365,72 @@ def fit_model(data: FittingData, verbose: bool = True) -> FitResult:
         rmse=rmse,
         aic=aic,
         bic=bic,
-        n_iterations=len(eval_history),  # Number of objective function evaluations
+        n_iterations=len(eval_history),
         converged=converged,
         objective_history=objective_history,
+        model_variant=model_variant,
         grid_search_alphas=grid_search_alphas,
         grid_search_objectives=grid_search_objectives,
     )
 
 
-def compute_standard_errors(data: FittingData, params: ModelParams) -> ModelParams:
+def compute_standard_errors(
+    data: FittingData,
+    params: ModelParams,
+    model_variant: str,
+) -> ModelParams:
     """Compute standard errors via numerical Hessian.
 
     Uses finite differences to approximate the Hessian of the negative
     log-likelihood, then inverts to get the covariance matrix.
 
     GDP0 is treated as a known constant (not estimated), so it is excluded
-    from the Hessian calculation.
+    from the Hessian calculation. For non-base variants, h0 is also excluded
+    (it's absorbed into j0).
     """
-    # Pack estimated parameters (excluding GDP0 which is fixed)
-    param_vec = pack_params_for_hessian(params, data.n_countries, data.n_years)
-    GDP0 = params.GDP0  # Fixed value
+    param_vec = pack_params_for_hessian(params, data.n_countries, data.n_years, model_variant)
+    GDP0 = params.GDP0
 
     def neg_log_likelihood(p):
-        params_temp = unpack_params_for_hessian(p, GDP0, data.n_countries, data.n_years)
-        pred = predict_from_data(data, params_temp)
+        h_params, j0, j1, j2, k = unpack_params_for_hessian(
+            p, data.n_countries, data.n_years, model_variant
+        )
+        alpha = p[0]
+        g_values = g_func(data.pcGDP, GDP0, alpha)
+        pred = compute_predictions(data, g_values, h_params, j0, j1, j2, k, model_variant)
         residuals = data.growth_pcGDP - pred
         ss_res = np.sum(residuals**2)
-        # Negative log likelihood (up to constant)
         return data.n_obs / 2 * np.log(ss_res / data.n_obs)
 
-    # Compute Hessian numerically
     try:
         hessian = compute_hessian(neg_log_likelihood, param_vec, eps=1e-5)
-
-        # Invert to get covariance matrix
         cov = np.linalg.inv(hessian)
         se = np.sqrt(np.maximum(np.diag(cov), 0))
-
-        # Unpack standard errors (GDP0 has no SE since it's fixed)
-        params = unpack_standard_errors(params, se, data.n_countries, data.n_years)
+        params = unpack_standard_errors(params, se, data.n_countries, data.n_years, model_variant)
     except (np.linalg.LinAlgError, ValueError) as e:
         print(f"Warning: Could not compute standard errors: {e}")
 
     return params
 
 
-def pack_params_for_hessian(params: ModelParams, n_countries: int, n_years: int) -> np.ndarray:
+def pack_params_for_hessian(
+    params: ModelParams,
+    n_countries: int,
+    n_years: int,
+    model_variant: str,
+) -> np.ndarray:
     """Pack estimated parameters into a vector for Hessian computation.
 
-    Excludes GDP0 since it is treated as a known constant.
+    Excludes GDP0. For non-base variants, h0 is also excluded (absorbed into j0).
     """
+    if model_variant == "base":
+        h_part = [params.h0, params.h1, params.h2, params.h3, params.h4]
+    else:
+        h_part = [params.h1, params.h2, params.h3, params.h4]
+
     return np.concatenate([
         [params.alpha],
-        [params.h0, params.h1, params.h2, params.h3, params.h4],
+        h_part,
         params.j0,
         params.j1,
         params.j2,
@@ -345,44 +438,55 @@ def pack_params_for_hessian(params: ModelParams, n_countries: int, n_years: int)
     ])
 
 
-def unpack_params_for_hessian(vec: np.ndarray, GDP0: float,
-                               n_countries: int, n_years: int) -> ModelParams:
-    """Unpack parameter vector into ModelParams, with GDP0 provided separately."""
-    idx = 0
+def unpack_params_for_hessian(
+    vec: np.ndarray,
+    n_countries: int,
+    n_years: int,
+    model_variant: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Unpack parameter vector for computing predictions.
 
-    alpha = vec[idx]; idx += 1
+    Returns: h_params (always length 5), j0, j1, j2, k
+    """
+    idx = 1  # Skip alpha (index 0)
 
-    h0 = vec[idx]; idx += 1
-    h1 = vec[idx]; idx += 1
-    h2 = vec[idx]; idx += 1
-    h3 = vec[idx]; idx += 1
-    h4 = vec[idx]; idx += 1
+    if model_variant == "base":
+        h_params = vec[idx:idx + 5]
+        idx += 5
+    else:
+        h_params = np.concatenate([[0.0], vec[idx:idx + 4]])
+        idx += 4
 
     j0 = vec[idx:idx + n_countries]; idx += n_countries
     j1 = vec[idx:idx + n_countries]; idx += n_countries
     j2 = vec[idx:idx + n_countries]; idx += n_countries
+    k = vec[idx:idx + n_years]
 
-    k = vec[idx:idx + n_years]; idx += n_years
-
-    return ModelParams(
-        GDP0=GDP0, alpha=alpha,
-        h0=h0, h1=h1, h2=h2, h3=h3, h4=h4,
-        j0=j0, j1=j1, j2=j2, k=k,
-    )
+    return h_params, j0, j1, j2, k
 
 
-def unpack_standard_errors(params: ModelParams, se: np.ndarray,
-                           n_countries: int, n_years: int) -> ModelParams:
+def unpack_standard_errors(
+    params: ModelParams,
+    se: np.ndarray,
+    n_countries: int,
+    n_years: int,
+    model_variant: str,
+) -> ModelParams:
     """Add standard errors to ModelParams.
 
     GDP0 has no standard error since it is a fixed known value.
+    For non-base variants, h0 SE is None (h0 is not estimated).
     """
     idx = 0
 
-    params.se_GDP0 = None  # GDP0 is fixed, no SE
+    params.se_GDP0 = None
     params.se_alpha = se[idx]; idx += 1
 
-    params.se_h0 = se[idx]; idx += 1
+    if model_variant == "base":
+        params.se_h0 = se[idx]; idx += 1
+    else:
+        params.se_h0 = None  # h0 absorbed into j0
+
     params.se_h1 = se[idx]; idx += 1
     params.se_h2 = se[idx]; idx += 1
     params.se_h3 = se[idx]; idx += 1

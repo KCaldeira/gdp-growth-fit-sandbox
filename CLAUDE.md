@@ -56,3 +56,7 @@ This project prioritizes elegant, fail-fast code that surfaces errors quickly ra
 - Let Python's natural error messages guide debugging rather than custom error handling
 - All function arguments must be explicitly provided - no default values (`=None`) or conditional logic
 - Clean fail-fast approach - if required arguments are not supplied, the code should fail immediately with a clear error
+
+### Plotting Conventions
+- **Temperature axis range**: Always use 0°C to 30°C for temperature axes in climate-growth plots
+- **Population-weighted reference values**: Use population-weighted means for reference values (GDP0, P_const) computed from the most recent year in the dataset
