@@ -30,6 +30,7 @@ from src.bootstrap import (
     BootstrapResult,
 )
 from src.model import h_func, g_func
+from src.output import save_all_outputs
 
 
 def plot_h_temperature_response(
@@ -496,9 +497,29 @@ def save_bootstrap_summary(
 
     params = bootstrap_result.params
 
+    # Define percentile ranges to report
+    # 1 - 1/e ≈ 0.6321, so symmetric interval is (1-0.6321)/2 = 18.39% to 81.61%
+    e_frac = 1 - 1/np.e  # ≈ 0.6321
+    percentile_ranges = [
+        ("95%", 2.5, 97.5),
+        ("90%", 5.0, 95.0),
+        (f"1-1/e ({100*e_frac:.1f}%)", 100*(1-e_frac)/2, 100*(1+e_frac)/2),
+        ("50% (IQR)", 25.0, 75.0),
+    ]
+
+    def format_ci_table(samples, point_est, fmt=":.6f"):
+        """Format a table of confidence intervals for a parameter."""
+        lines = []
+        lines.append(f"  Point estimate: {point_est:{fmt[1:]}}")
+        lines.append(f"  Bootstrap median: {np.percentile(samples, 50):{fmt[1:]}}")
+        for name, lo, hi in percentile_ranges:
+            p_lo, p_hi = np.percentile(samples, [lo, hi])
+            lines.append(f"  {name:20s} CI: [{p_lo:{fmt[1:]}}, {p_hi:{fmt[1:]}}]")
+        return "\n".join(lines)
+
     with open(output_dir / "bootstrap_summary.txt", "w") as f:
         f.write("Cluster Bootstrap Uncertainty Analysis\n")
-        f.write("=" * 50 + "\n\n")
+        f.write("=" * 60 + "\n\n")
         f.write(f"Bootstrap iterations: {bootstrap_result.n_bootstrap}\n")
         f.write(f"Successful fits: {bootstrap_result.n_successful}\n")
         if bootstrap_result.constrained:
@@ -507,47 +528,62 @@ def save_bootstrap_summary(
             f.write(f"Model variant: {bootstrap_result.model_variant}\n")
         f.write("\n")
 
-        f.write("Parameter Estimates (Point Est, [95% Bootstrap CI])\n")
-        f.write("-" * 50 + "\n\n")
+        f.write("Percentile ranges reported:\n")
+        f.write("  95%        = [2.5%, 97.5%]\n")
+        f.write("  90%        = [5%, 95%]\n")
+        f.write(f"  1-1/e      = [{100*(1-e_frac)/2:.2f}%, {100*(1+e_frac)/2:.2f}%] (≈63.2% of samples)\n")
+        f.write("  50% (IQR)  = [25%, 75%]\n")
+        f.write("\n")
+        f.write("=" * 60 + "\n\n")
 
         # Alpha
-        p2_5, p50, p97_5 = np.percentile(alpha_samples, [2.5, 50, 97.5])
-        f.write(f"alpha:  {params.alpha:.6f}  [{p2_5:.6f}, {p97_5:.6f}]\n\n")
+        f.write("ALPHA (convergence parameter)\n")
+        f.write("-" * 40 + "\n")
+        f.write(format_ci_table(alpha_samples, params.alpha, ":.6f"))
+        f.write("\n\n")
 
         if bootstrap_result.constrained:
             # Constrained model: show T*, P*, h2, h4 first
             T_opt_samples = bootstrap_result.T_opt_samples[valid_mask]
             P_opt_samples = bootstrap_result.P_opt_samples[valid_mask]
 
-            p2_5, p50, p97_5 = np.percentile(T_opt_samples, [2.5, 50, 97.5])
-            f.write(f"T* (optimal temp):  {bootstrap_result.T_opt_point:.2f}°C  [{p2_5:.2f}, {p97_5:.2f}]°C\n")
+            f.write("T* (optimal temperature, °C)\n")
+            f.write("-" * 40 + "\n")
+            f.write(format_ci_table(T_opt_samples, bootstrap_result.T_opt_point, ":.2f"))
+            f.write("\n\n")
 
-            p2_5, p50, p97_5 = np.percentile(P_opt_samples, [2.5, 50, 97.5])
-            f.write(f"P* (optimal prec):  {bootstrap_result.P_opt_point:.4f}  [{p2_5:.4f}, {p97_5:.4f}]\n\n")
+            f.write("P* (optimal log-precipitation)\n")
+            f.write("-" * 40 + "\n")
+            f.write(format_ci_table(P_opt_samples, bootstrap_result.P_opt_point, ":.4f"))
+            f.write("\n\n")
 
-            f.write("Constrained h parameters:\n")
-            p2_5, p50, p97_5 = np.percentile(h_samples[:, 2], [2.5, 50, 97.5])
-            f.write(f"  h2:  {params.h2:.6e}  [{p2_5:.6e}, {p97_5:.6e}]\n")
-            p2_5, p50, p97_5 = np.percentile(h_samples[:, 4], [2.5, 50, 97.5])
-            f.write(f"  h4:  {params.h4:.6e}  [{p2_5:.6e}, {p97_5:.6e}]\n\n")
+            f.write("h2 (temperature quadratic)\n")
+            f.write("-" * 40 + "\n")
+            f.write(format_ci_table(h_samples[:, 2], params.h2, ":.6e"))
+            f.write("\n\n")
 
-            f.write("Derived unconstrained h parameters:\n")
-            p2_5, p50, p97_5 = np.percentile(h_samples[:, 0], [2.5, 50, 97.5])
-            f.write(f"  h0:  {params.h0:.6e}  [{p2_5:.6e}, {p97_5:.6e}]\n")
-            p2_5, p50, p97_5 = np.percentile(h_samples[:, 1], [2.5, 50, 97.5])
-            f.write(f"  h1:  {params.h1:.6e}  [{p2_5:.6e}, {p97_5:.6e}]\n")
-            p2_5, p50, p97_5 = np.percentile(h_samples[:, 3], [2.5, 50, 97.5])
-            f.write(f"  h3:  {params.h3:.6e}  [{p2_5:.6e}, {p97_5:.6e}]\n")
+            f.write("h4 (precipitation quadratic)\n")
+            f.write("-" * 40 + "\n")
+            f.write(format_ci_table(h_samples[:, 4], params.h4, ":.6e"))
+            f.write("\n\n")
 
         else:
             # Unconstrained model: show h parameters
             h_names = ['h0', 'h1', 'h2', 'h3', 'h4']
+            h_descriptions = [
+                'h0 (intercept)',
+                'h1 (temperature linear)',
+                'h2 (temperature quadratic)',
+                'h3 (precipitation linear)',
+                'h4 (precipitation quadratic)',
+            ]
             h_point = [params.h0, params.h1, params.h2, params.h3, params.h4]
-            for i, name in enumerate(h_names):
-                p2_5, p50, p97_5 = np.percentile(h_samples[:, i], [2.5, 50, 97.5])
-                f.write(f"{name}:  {h_point[i]:.6e}  [{p2_5:.6e}, {p97_5:.6e}]\n")
 
-            f.write("\n")
+            for i, (name, desc) in enumerate(zip(h_names, h_descriptions)):
+                f.write(f"{desc}\n")
+                f.write("-" * 40 + "\n")
+                f.write(format_ci_table(h_samples[:, i], h_point[i], ":.6e"))
+                f.write("\n\n")
 
             # Derived optimal temperature (for unconstrained only)
             T_opt_point = -params.h1 / (2 * params.h2)
@@ -555,12 +591,11 @@ def save_bootstrap_summary(
             T_opt_clean = T_opt_samples[np.isfinite(T_opt_samples)]
             q1, q99 = np.percentile(T_opt_clean, [1, 99])
             T_opt_clean = T_opt_clean[(T_opt_clean >= q1) & (T_opt_clean <= q99)]
-            p2_5, p50, p97_5 = np.percentile(T_opt_clean, [2.5, 50, 97.5])
 
-            f.write(f"\nDerived Optimal Temperature T* = -h1/(2*h2):\n")
-            f.write(f"  Point estimate: {T_opt_point:.2f}°C\n")
-            f.write(f"  Bootstrap median: {p50:.2f}°C\n")
-            f.write(f"  95% Bootstrap CI: [{p2_5:.2f}, {p97_5:.2f}]°C\n")
+            f.write("T* = -h1/(2*h2) (derived optimal temperature, °C)\n")
+            f.write("-" * 40 + "\n")
+            f.write(format_ci_table(T_opt_clean, T_opt_point, ":.2f"))
+            f.write("\n")
 
     print(f"  Saved: bootstrap_summary.txt")
 
@@ -648,8 +683,12 @@ def main():
     GDP_percentiles = [10, 25, 50, 75, 90]
     GDP_values = [np.percentile(data.pcGDP, p) for p in GDP_percentiles]
 
-    # Generate plots
-    print(f"\nGenerating plots (output: {output_dir})...")
+    # Save point estimate outputs (same format as run_fit.py)
+    print(f"\nSaving point estimate outputs...")
+    save_all_outputs(fit_result, data, output_dir)
+
+    # Generate bootstrap-specific plots and outputs
+    print(f"\nGenerating bootstrap plots and outputs...")
 
     plot_h_temperature_response(bootstrap_result, T_range, P_const, output_dir)
     plot_g_gdp_response(bootstrap_result, GDP_range, output_dir)
