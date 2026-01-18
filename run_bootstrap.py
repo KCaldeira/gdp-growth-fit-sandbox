@@ -498,12 +498,13 @@ def save_bootstrap_summary(
     params = bootstrap_result.params
 
     # Define percentile ranges to report
-    # 1 - 1/e ≈ 0.6321, so symmetric interval is (1-0.6321)/2 = 18.39% to 81.61%
-    e_frac = 1 - 1/np.e  # ≈ 0.6321
+    # 1 SD of normal = 68.27%, so [15.87%, 84.13%]
+    # 2 SD of normal = 95.45%, so [2.28%, 97.72%]
     percentile_ranges = [
+        ("2 SD (95.45%)", 2.275, 97.725),
         ("95%", 2.5, 97.5),
         ("90%", 5.0, 95.0),
-        (f"1-1/e ({100*e_frac:.1f}%)", 100*(1-e_frac)/2, 100*(1+e_frac)/2),
+        ("1 SD (68.27%)", 15.865, 84.135),
         ("50% (IQR)", 25.0, 75.0),
     ]
 
@@ -511,7 +512,10 @@ def save_bootstrap_summary(
         """Format a table of confidence intervals for a parameter."""
         lines = []
         lines.append(f"  Point estimate: {point_est:{fmt[1:]}}")
-        lines.append(f"  Bootstrap median: {np.percentile(samples, 50):{fmt[1:]}}")
+        median_val = np.percentile(samples, 50)
+        # SE of median = sqrt(pi/2) * SD / sqrt(n) for normal distribution
+        se_median = np.sqrt(np.pi / 2) * np.std(samples) / np.sqrt(len(samples))
+        lines.append(f"  Bootstrap median: {median_val:{fmt[1:]}} (SE: {se_median:{fmt[1:]}})")
         for name, lo, hi in percentile_ranges:
             p_lo, p_hi = np.percentile(samples, [lo, hi])
             lines.append(f"  {name:20s} CI: [{p_lo:{fmt[1:]}}, {p_hi:{fmt[1:]}}]")
@@ -529,9 +533,10 @@ def save_bootstrap_summary(
         f.write("\n")
 
         f.write("Percentile ranges reported:\n")
+        f.write("  2 SD       = [2.28%, 97.72%] (95.45% of normal distribution)\n")
         f.write("  95%        = [2.5%, 97.5%]\n")
         f.write("  90%        = [5%, 95%]\n")
-        f.write(f"  1-1/e      = [{100*(1-e_frac)/2:.2f}%, {100*(1+e_frac)/2:.2f}%] (≈63.2% of samples)\n")
+        f.write("  1 SD       = [15.87%, 84.13%] (68.27% of normal distribution)\n")
         f.write("  50% (IQR)  = [25%, 75%]\n")
         f.write("\n")
         f.write("=" * 60 + "\n\n")
@@ -595,9 +600,134 @@ def save_bootstrap_summary(
             f.write("T* = -h1/(2*h2) (derived optimal temperature, °C)\n")
             f.write("-" * 40 + "\n")
             f.write(format_ci_table(T_opt_clean, T_opt_point, ":.2f"))
+            f.write("\n\n")
+
+            # Derived optimal precipitation (for unconstrained only)
+            P_opt_point = -params.h3 / (2 * params.h4)
+            h3_samples = h_samples[:, 3]
+            h4_samples = h_samples[:, 4]
+            P_opt_samples = -h3_samples / (2 * h4_samples)
+            P_opt_clean = P_opt_samples[np.isfinite(P_opt_samples)]
+            q1, q99 = np.percentile(P_opt_clean, [1, 99])
+            P_opt_clean = P_opt_clean[(P_opt_clean >= q1) & (P_opt_clean <= q99)]
+
+            f.write("P* = -h3/(2*h4) (derived optimal log-precipitation)\n")
+            f.write("-" * 40 + "\n")
+            f.write(format_ci_table(P_opt_clean, P_opt_point, ":.4f"))
             f.write("\n")
 
     print(f"  Saved: bootstrap_summary.txt")
+
+
+def compute_stats_from_csv(csv_path: Path, output_path: Path) -> None:
+    """Compute bootstrap statistics from an existing CSV file.
+
+    Args:
+        csv_path: Path to bootstrap_coefficients_simple.csv
+        output_path: Path to write the summary output
+    """
+    # Define percentile ranges
+    percentile_ranges = [
+        ("2 SD (95.45%)", 2.275, 97.725),
+        ("95%", 2.5, 97.5),
+        ("90%", 5.0, 95.0),
+        ("1 SD (68.27%)", 15.865, 84.135),
+        ("50% (IQR)", 25.0, 75.0),
+    ]
+
+    def format_ci_table(samples, fmt=":.6f"):
+        """Format a table of confidence intervals for a parameter."""
+        lines = []
+        median_val = np.percentile(samples, 50)
+        # SE of median = sqrt(pi/2) * SD / sqrt(n) for normal distribution
+        se_median = np.sqrt(np.pi / 2) * np.std(samples) / np.sqrt(len(samples))
+        lines.append(f"  Bootstrap median: {median_val:{fmt[1:]}} (SE: {se_median:{fmt[1:]}})")
+        for name, lo, hi in percentile_ranges:
+            p_lo, p_hi = np.percentile(samples, [lo, hi])
+            lines.append(f"  {name:20s} CI: [{p_lo:{fmt[1:]}}, {p_hi:{fmt[1:]}}]")
+        return "\n".join(lines)
+
+    # Read CSV
+    df = pd.read_csv(csv_path)
+    n_samples = len(df)
+
+    print(f"Read {n_samples} bootstrap samples from {csv_path}")
+
+    with open(output_path, "w") as f:
+        f.write("Bootstrap Statistics from CSV\n")
+        f.write("=" * 60 + "\n\n")
+        f.write(f"Source file: {csv_path}\n")
+        f.write(f"Number of samples: {n_samples}\n\n")
+
+        f.write("Percentile ranges reported:\n")
+        f.write("  2 SD       = [2.28%, 97.72%] (95.45% of normal distribution)\n")
+        f.write("  95%        = [2.5%, 97.5%]\n")
+        f.write("  90%        = [5%, 95%]\n")
+        f.write("  1 SD       = [15.87%, 84.13%] (68.27% of normal distribution)\n")
+        f.write("  50% (IQR)  = [25%, 75%]\n")
+        f.write("\n")
+        f.write("=" * 60 + "\n\n")
+
+        # Check which columns are present
+        if 'alpha' in df.columns:
+            f.write("ALPHA (convergence parameter)\n")
+            f.write("-" * 40 + "\n")
+            f.write(format_ci_table(df['alpha'].values, ":.6f"))
+            f.write("\n\n")
+
+        # h parameters
+        h_cols = ['h0', 'h1', 'h2', 'h3', 'h4']
+        h_descriptions = [
+            'h0 (intercept)',
+            'h1 (temperature linear)',
+            'h2 (temperature quadratic)',
+            'h3 (precipitation linear)',
+            'h4 (precipitation quadratic)',
+        ]
+        for col, desc in zip(h_cols, h_descriptions):
+            if col in df.columns:
+                f.write(f"{desc}\n")
+                f.write("-" * 40 + "\n")
+                f.write(format_ci_table(df[col].values, ":.6e"))
+                f.write("\n\n")
+
+        # Derived T* and P* if h1, h2, h3, h4 are present
+        if all(col in df.columns for col in ['h1', 'h2']):
+            T_opt_samples = -df['h1'].values / (2 * df['h2'].values)
+            T_opt_clean = T_opt_samples[np.isfinite(T_opt_samples)]
+            if len(T_opt_clean) > 0:
+                q1, q99 = np.percentile(T_opt_clean, [1, 99])
+                T_opt_clean = T_opt_clean[(T_opt_clean >= q1) & (T_opt_clean <= q99)]
+                f.write("T* = -h1/(2*h2) (derived optimal temperature, °C)\n")
+                f.write("-" * 40 + "\n")
+                f.write(format_ci_table(T_opt_clean, ":.2f"))
+                f.write("\n\n")
+
+        if all(col in df.columns for col in ['h3', 'h4']):
+            P_opt_samples = -df['h3'].values / (2 * df['h4'].values)
+            P_opt_clean = P_opt_samples[np.isfinite(P_opt_samples)]
+            if len(P_opt_clean) > 0:
+                q1, q99 = np.percentile(P_opt_clean, [1, 99])
+                P_opt_clean = P_opt_clean[(P_opt_clean >= q1) & (P_opt_clean <= q99)]
+                f.write("P* = -h3/(2*h4) (derived optimal log-precipitation)\n")
+                f.write("-" * 40 + "\n")
+                f.write(format_ci_table(P_opt_clean, ":.4f"))
+                f.write("\n")
+
+        # T_opt and P_opt if directly present (constrained model)
+        if 'T_opt' in df.columns:
+            f.write("T* (optimal temperature, °C) - directly estimated\n")
+            f.write("-" * 40 + "\n")
+            f.write(format_ci_table(df['T_opt'].values, ":.2f"))
+            f.write("\n\n")
+
+        if 'P_opt' in df.columns:
+            f.write("P* (optimal log-precipitation) - directly estimated\n")
+            f.write("-" * 40 + "\n")
+            f.write(format_ci_table(df['P_opt'].values, ":.4f"))
+            f.write("\n")
+
+    print(f"Saved statistics to: {output_path}")
 
 
 def main():
@@ -620,7 +750,28 @@ def main():
                              "This normalizes the climate response to pass through "
                              "zero at optimal temperature and precipitation. "
                              "Only available for base model variant.")
+    parser.add_argument("--from-csv", type=str, default=None,
+                        help="Compute statistics from existing bootstrap CSV file "
+                             "(e.g., bootstrap_coefficients_simple.csv). "
+                             "When specified, skips bootstrap and just computes stats.")
     args = parser.parse_args()
+
+    # Handle --from-csv mode
+    if args.from_csv:
+        csv_path = Path(args.from_csv).expanduser()
+        if not csv_path.exists():
+            print(f"Error: File not found: {csv_path}")
+            return
+
+        # Determine output path
+        if args.output_dir:
+            output_path = Path(args.output_dir) / "bootstrap_stats_from_csv.txt"
+            Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+        else:
+            output_path = csv_path.parent / "bootstrap_stats_from_csv.txt"
+
+        compute_stats_from_csv(csv_path, output_path)
+        return
 
     # Create output directory
     if args.output_dir:

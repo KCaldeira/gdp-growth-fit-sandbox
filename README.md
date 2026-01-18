@@ -62,7 +62,20 @@ k(t) = k[t]   (with k[first_year] = 0 for identifiability)
 The cluster bootstrap resamples **countries with replacement**, preserving within-country correlation across years. This approach:
 - Does not assume normality of errors
 - Captures the full parameter correlation structure
-- Provides percentile-based confidence intervals
+- Provides percentile-based confidence intervals at multiple levels
+
+**Reported percentile ranges:**
+| Range | Percentiles | Description |
+|-------|-------------|-------------|
+| 2 SD | [2.28%, 97.72%] | 95.45% of normal distribution |
+| 95% | [2.5%, 97.5%] | Standard 95% CI |
+| 90% | [5%, 95%] | 90% CI |
+| 1 SD | [15.87%, 84.13%] | 68.27% of normal distribution |
+| 50% (IQR) | [25%, 75%] | Interquartile range |
+
+**Derived quantities:**
+- **T\*** = -h1/(2×h2): Optimal temperature
+- **P\*** = -h3/(2×h4): Optimal log-precipitation
 
 ```bash
 python run_bootstrap.py --n-bootstrap 1000 --model-variant base
@@ -100,6 +113,18 @@ python run_bootstrap.py \
   --data-file data/input/df_base_withPop.csv
 ```
 
+### Compute Statistics from Existing Results
+
+You can compute summary statistics from a previously-generated bootstrap CSV without re-running the bootstrap:
+
+```bash
+# Compute stats from existing CSV (output goes to same directory)
+python run_bootstrap.py --from-csv ./data/output/bootstrap_20260118_065142/bootstrap_coefficients_simple.csv
+
+# Specify different output directory
+python run_bootstrap.py --from-csv ./path/to/bootstrap_coefficients_simple.csv --output-dir ./my_stats
+```
+
 ### Command Line Options (run_bootstrap.py)
 
 | Option | Default | Description |
@@ -109,22 +134,48 @@ python run_bootstrap.py \
 | `--model-variant` | base | Model variant: base, g_scales_hj, g_scales_all |
 | `--output-dir` | auto | Output directory (default: ./data/output/bootstrap_{timestamp}) |
 | `--data-file` | data/input/df_base_withPop.csv | Input data file |
+| `--from-csv` | none | Compute stats from existing CSV (skips bootstrap) |
+| `--constrained` | false | Use constrained model with h(T\*, P\*) = 0 |
 
 ## Output Files
 
 ### Bootstrap Analysis Output
 
+The bootstrap now produces both point estimate outputs and bootstrap-specific outputs:
+
 ```
 data/output/bootstrap_{timestamp}/
-├── bootstrap_coefficients.csv    # All Monte Carlo samples (alpha, h1-h4, T_optimal)
-├── bootstrap_summary.txt         # Summary statistics with 95% CIs
-├── bootstrap_h_temperature.png   # h(T) with bootstrap 95% CI
-├── bootstrap_g_gdp.png          # g(GDP) with bootstrap 95% CI
-├── bootstrap_gh_combined.png    # g(GDP)*h(T) for multiple GDP levels
-├── bootstrap_dhdT.png           # Marginal effect dh/dT with CI
-├── bootstrap_alpha.png          # Bootstrap distribution of α
-└── bootstrap_optimal_temperature.png  # Distribution of optimal T*
+├── # Point estimate outputs (same as run_fit.py)
+├── global_params.json               # GDP0, alpha, h0-h4 with Hessian SEs
+├── country_params.csv               # j0, j1, j2 for each country
+├── year_effects.csv                 # k[t] for each year
+├── summary.json/txt                 # Fit statistics (R², RMSE, AIC, BIC)
+├── diagnostics.png                  # Residual diagnostic plots
+├── climate_response_*.png           # Climate response visualizations
+├── residuals.csv                    # Fitted values and residuals
+│
+├── # Bootstrap coefficient samples
+├── bootstrap_coefficients_simple.csv    # alpha, h0-h4 for each iteration
+├── bootstrap_coefficients_complete.csv  # All parameters including j and k
+│
+├── # Bootstrap summary (multiple CI levels, SE on median)
+├── bootstrap_summary.txt            # Statistics with 2SD/95%/90%/1SD/IQR CIs
+├── bootstrap_stats_from_csv.txt     # (if using --from-csv)
+│
+├── # Bootstrap plots
+├── bootstrap_h_temperature.png      # h(T) with bootstrap 95% CI
+├── bootstrap_g_gdp.png              # g(GDP) with bootstrap 95% CI
+├── bootstrap_gh_combined.png        # g(GDP)*h(T) for multiple GDP levels
+├── bootstrap_dhdT.png               # Marginal effect dh/dT with CI
+├── bootstrap_alpha.png              # Bootstrap distribution of α
+└── bootstrap_optimal_temperature.png # Distribution of optimal T*
 ```
+
+**bootstrap_coefficients_simple.csv** columns:
+- `iteration`, `alpha`, `h0`, `h1`, `h2`, `h3`, `h4`
+
+**bootstrap_coefficients_complete.csv** columns:
+- `iteration`, `alpha`, `h0`-`h4`, `j0_0`...`j0_N`, `j1_0`...`j1_N`, `j2_0`...`j2_N`, `k_0`...`k_M`
 
 ### Standard Fit Output (via run_fit.py)
 
