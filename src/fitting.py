@@ -25,7 +25,7 @@ from dataclasses import dataclass
 
 from .model import (
     ModelParams, g_func, h_func, h_func_constrained, j_func, k_func,
-    predict_from_data, constrained_to_unconstrained_h,
+    predict_from_data, constrained_to_unconstrained_h, compute_mean_centered_params,
 )
 from .data_loader import FittingData
 
@@ -69,7 +69,7 @@ def build_linear_design_matrix(
         "g_scales_all": y = g*h1*T + g*h2*T^2 + g*h3*P + g*h4*P^2 + g*j + g*k
 
     For g_scales_hj and g_scales_all, h0 is absorbed into j0.
-    We drop k[0] = 0 for identifiability (first year is reference).
+    We drop j0[0] = j1[0] = j2[0] = 0 for identifiability (first country is reference).
 
     Returns design matrix X.
     """
@@ -96,28 +96,28 @@ def build_linear_design_matrix(
             g_values * data.precp**2,
         ])
 
-    # j parameters: 3 * n_countries columns
+    # j parameters: 3 * (n_countries - 1) columns (drop j[0] for identifiability)
     # For model variants, j may be scaled by g
     scale_j = g_values if model_variant in ["g_scales_hj", "g_scales_all"] else np.ones(n)
 
-    X_j = np.zeros((n, 3 * n_countries))
+    X_j = np.zeros((n, 3 * (n_countries - 1)))
     for obs_idx in range(n):
         i = data.country_idx[obs_idx]
-        t = data.time[obs_idx]
-        s = scale_j[obs_idx]
-        X_j[obs_idx, i] = s                      # j0[i] (possibly scaled by g)
-        X_j[obs_idx, n_countries + i] = s * t    # j1[i] * t
-        X_j[obs_idx, 2 * n_countries + i] = s * t**2  # j2[i] * t^2
+        if i > 0:  # Skip country 0 (reference country)
+            t = data.time[obs_idx]
+            s = scale_j[obs_idx]
+            X_j[obs_idx, i - 1] = s                           # j0[i] (possibly scaled by g)
+            X_j[obs_idx, (n_countries - 1) + (i - 1)] = s * t  # j1[i] * t
+            X_j[obs_idx, 2 * (n_countries - 1) + (i - 1)] = s * t**2  # j2[i] * t^2
 
-    # k parameters: n_years - 1 columns (drop k[0] for identifiability)
+    # k parameters: n_years columns (all years estimated)
     # For g_scales_all, k is scaled by g
     scale_k = g_values if model_variant == "g_scales_all" else np.ones(n)
 
-    X_k = np.zeros((n, n_years - 1))
+    X_k = np.zeros((n, n_years))
     for obs_idx in range(n):
         y = data.year_idx[obs_idx]
-        if y > 0:
-            X_k[obs_idx, y - 1] = scale_k[obs_idx]
+        X_k[obs_idx, y] = scale_k[obs_idx]
 
     # Combine all columns
     X = np.hstack([X_h, X_j, X_k])
@@ -137,8 +137,8 @@ def solve_linear_subproblem(
     Returns:
         h_params: array of shape (5,) for base, (4,) for other variants
                   For non-base variants, h0 is set to 0.0 and h_params = [0, h1, h2, h3, h4]
-        j0, j1, j2: arrays of shape (n_countries,)
-        k: array of shape (n_years,) with k[0] = 0
+        j0, j1, j2: arrays of shape (n_countries,) with j[0] = 0 (first country is reference)
+        k: array of shape (n_years,)
     """
     from scipy import linalg
 
@@ -158,12 +158,18 @@ def solve_linear_subproblem(
         # Return h_params as [0, h1, h2, h3, h4] for consistency
         h_params = np.concatenate([[0.0], beta[:4]])
 
-    j0 = beta[n_h:n_h + n_countries]
-    j1 = beta[n_h + n_countries:n_h + 2 * n_countries]
-    j2 = beta[n_h + 2 * n_countries:n_h + 3 * n_countries]
+    n_j = n_countries - 1  # Number of estimated j parameters per coefficient
 
-    k = np.zeros(n_years)
-    k[1:] = beta[n_h + 3 * n_countries:]
+    j0 = np.zeros(n_countries)
+    j0[1:] = beta[n_h:n_h + n_j]
+
+    j1 = np.zeros(n_countries)
+    j1[1:] = beta[n_h + n_j:n_h + 2 * n_j]
+
+    j2 = np.zeros(n_countries)
+    j2[1:] = beta[n_h + 2 * n_j:n_h + 3 * n_j]
+
+    k = beta[n_h + 3 * n_j:]
 
     return h_params, j0, j1, j2, k
 
@@ -285,7 +291,7 @@ def fit_model(
         print(f"Fitting model...")
         print(f"  Model variant: {model_variant} [{variant_desc[model_variant]}]")
         print(f"  N={data.n_obs}, countries={data.n_countries}, years={data.n_years}")
-        print(f"  GDP0 (fixed) = {GDP0:.2f} (pop-weighted mean GDP, {data.gdp0_reference_year})")
+        print(f"  GDP0 (fixed) = {GDP0:.2f} (pop-weighted mean GDP, {data.gdp0_reference_years[0]}-{data.gdp0_reference_years[1]})")
 
     # Optimize alpha using Brent's method on [0.01, 0.99]
     if verbose:
@@ -351,7 +357,7 @@ def fit_model(
     # AIC/BIC (assuming Gaussian errors)
     # For non-base variants, h0 is absorbed so we have 4 h params instead of 5
     n_h_params = 5 if model_variant == "base" else 4
-    n_params = 1 + n_h_params + 3 * data.n_countries + (data.n_years - 1)
+    n_params = 1 + n_h_params + 3 * (data.n_countries - 1) + data.n_years
     log_likelihood = -data.n_obs / 2 * (np.log(2 * np.pi * ss_res / data.n_obs) + 1)
     aic = 2 * n_params - 2 * log_likelihood
     bic = np.log(data.n_obs) * n_params - 2 * log_likelihood
@@ -366,6 +372,9 @@ def fit_model(
     if verbose:
         print(f"\nComputing standard errors via Hessian (this may take a while)...")
     params = compute_standard_errors(data, params, model_variant)
+
+    # Compute mean-centered parameters (alternative parameterization)
+    compute_mean_centered_params(params, data.n_years)
 
     return FitResult(
         params=params,
@@ -421,29 +430,29 @@ def build_constrained_design_matrix_sparse(
         g_values * (data.precp - P_opt)**2,  # h4 column
     ])
 
-    # j parameters: 3 * n_countries sparse columns
-    row_idx = np.arange(n)
-    col_j0 = data.country_idx
-    col_j1 = n_countries + data.country_idx
-    col_j2 = 2 * n_countries + data.country_idx
-    data_j0 = np.ones(n)
-    data_j1 = data.time
-    data_j2 = data.time**2
+    # j parameters: skip country 0 (reference country)
+    mask_j = data.country_idx > 0
+    row_j = np.arange(n)[mask_j]
+    col_j0 = data.country_idx[mask_j] - 1
+    col_j1 = (n_countries - 1) + data.country_idx[mask_j] - 1
+    col_j2 = 2 * (n_countries - 1) + data.country_idx[mask_j] - 1
+    data_j0 = np.ones(len(row_j))
+    data_j1 = data.time[mask_j]
+    data_j2 = data.time[mask_j]**2
 
     J_sparse = sparse.csr_matrix(
         (np.concatenate([data_j0, data_j1, data_j2]),
-         (np.tile(row_idx, 3), np.concatenate([col_j0, col_j1, col_j2]))),
-        shape=(n, 3 * n_countries)
+         (np.tile(row_j, 3), np.concatenate([col_j0, col_j1, col_j2]))),
+        shape=(n, 3 * (n_countries - 1))
     )
 
-    # k parameters: n_years - 1 sparse columns (drop k[0])
-    mask = data.year_idx > 0
-    row_k = np.arange(n)[mask]
-    col_k = data.year_idx[mask] - 1
+    # k parameters: n_years sparse columns (all years estimated)
+    row_k = np.arange(n)
+    col_k = data.year_idx
 
     K_sparse = sparse.csr_matrix(
-        (np.ones(len(row_k)), (row_k, col_k)),
-        shape=(n, n_years - 1)
+        (np.ones(n), (row_k, col_k)),
+        shape=(n, n_years)
     )
 
     # Combine: X_h (as sparse) | J_sparse | K_sparse
@@ -487,12 +496,18 @@ def solve_constrained_subproblem(
     h2 = beta[0]
     h4 = beta[1]
 
-    j0 = beta[2:2 + n_countries]
-    j1 = beta[2 + n_countries:2 + 2 * n_countries]
-    j2 = beta[2 + 2 * n_countries:2 + 3 * n_countries]
+    n_j = n_countries - 1
 
-    k = np.zeros(n_years)
-    k[1:] = beta[2 + 3 * n_countries:]
+    j0 = np.zeros(n_countries)
+    j0[1:] = beta[2:2 + n_j]
+
+    j1 = np.zeros(n_countries)
+    j1[1:] = beta[2 + n_j:2 + 2 * n_j]
+
+    j2 = np.zeros(n_countries)
+    j2[1:] = beta[2 + 2 * n_j:2 + 3 * n_j]
+
+    k = beta[2 + 3 * n_j:]
 
     return h2, h4, j0, j1, j2, k
 
@@ -580,7 +595,7 @@ def fit_model_constrained(
         print(f"Fitting constrained model...")
         print(f"  Model: h(T, P) = h2*(T - T*)^2 + h4*(P - P*)^2")
         print(f"  N={data.n_obs}, countries={data.n_countries}, years={data.n_years}")
-        print(f"  GDP0 (fixed) = {GDP0:.2f} (pop-weighted mean GDP, {data.gdp0_reference_year})")
+        print(f"  GDP0 (fixed) = {GDP0:.2f} (pop-weighted mean GDP, {data.gdp0_reference_years[0]}-{data.gdp0_reference_years[1]})")
         print(f"  T* bounds: [{T_min:.1f}, {T_max:.1f}]°C")
         print(f"  P* bounds: [{P_min:.2f}, {P_max:.2f}]")
 
@@ -649,10 +664,10 @@ def fit_model_constrained(
     rmse = np.sqrt(ss_res / data.n_obs)
 
     # AIC/BIC: 3 nonlinear params (alpha, T_opt, P_opt) + 2 h params (h2, h4)
-    # + 3*n_countries j params + (n_years-1) k params
+    # + 3*(n_countries-1) j params + n_years k params
     # But h2 and h4 are from linear solve, so effectively 3 nonlinear params
     # For consistency with unconstrained, count all linear params
-    n_params = 1 + 2 + 3 * data.n_countries + (data.n_years - 1)  # alpha + h2,h4 + j + k
+    n_params = 1 + 2 + 3 * (data.n_countries - 1) + data.n_years  # alpha + h2,h4 + j + k
     log_likelihood = -data.n_obs / 2 * (np.log(2 * np.pi * ss_res / data.n_obs) + 1)
     aic = 2 * n_params - 2 * log_likelihood
     bic = np.log(data.n_obs) * n_params - 2 * log_likelihood
@@ -673,6 +688,9 @@ def fit_model_constrained(
         print(f"  h3 = {h3:.6e}")
 
     objective_history = [obj for _, obj in eval_history]
+
+    # Compute mean-centered parameters (alternative parameterization)
+    compute_mean_centered_params(params, data.n_years)
 
     return FitResult(
         params=params,
@@ -748,10 +766,10 @@ def pack_params_for_hessian(
     return np.concatenate([
         [params.alpha],
         h_part,
-        params.j0,
-        params.j1,
-        params.j2,
-        params.k,
+        params.j0[1:],  # Skip j0[0] (reference country)
+        params.j1[1:],  # Skip j1[0]
+        params.j2[1:],  # Skip j2[0]
+        params.k,       # All k values
     ])
 
 
@@ -774,9 +792,17 @@ def unpack_params_for_hessian(
         h_params = np.concatenate([[0.0], vec[idx:idx + 4]])
         idx += 4
 
-    j0 = vec[idx:idx + n_countries]; idx += n_countries
-    j1 = vec[idx:idx + n_countries]; idx += n_countries
-    j2 = vec[idx:idx + n_countries]; idx += n_countries
+    n_j = n_countries - 1
+
+    j0 = np.zeros(n_countries)
+    j0[1:] = vec[idx:idx + n_j]; idx += n_j
+
+    j1 = np.zeros(n_countries)
+    j1[1:] = vec[idx:idx + n_j]; idx += n_j
+
+    j2 = np.zeros(n_countries)
+    j2[1:] = vec[idx:idx + n_j]; idx += n_j
+
     k = vec[idx:idx + n_years]
 
     return h_params, j0, j1, j2, k
@@ -809,9 +835,17 @@ def unpack_standard_errors(
     params.se_h3 = se[idx]; idx += 1
     params.se_h4 = se[idx]; idx += 1
 
-    params.se_j0 = se[idx:idx + n_countries]; idx += n_countries
-    params.se_j1 = se[idx:idx + n_countries]; idx += n_countries
-    params.se_j2 = se[idx:idx + n_countries]; idx += n_countries
+    n_j = n_countries - 1
+
+    # First country has no SE (constrained to 0)
+    params.se_j0 = np.zeros(n_countries)
+    params.se_j0[1:] = se[idx:idx + n_j]; idx += n_j
+
+    params.se_j1 = np.zeros(n_countries)
+    params.se_j1[1:] = se[idx:idx + n_j]; idx += n_j
+
+    params.se_j2 = np.zeros(n_countries)
+    params.se_j2[1:] = se[idx:idx + n_j]; idx += n_j
 
     params.se_k = se[idx:idx + n_years]
 

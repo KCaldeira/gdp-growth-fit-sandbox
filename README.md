@@ -36,7 +36,7 @@ For `g_scales_hj` and `g_scales_all`, h0 is absorbed into j0 (4 h parameters ins
 ```
 g(GDP) = (GDP / GDP0)^(-alpha)
 ```
-- `GDP0` is **fixed** to the population-weighted mean GDP for the most recent year
+- `GDP0` is **fixed** using 5-year (2018-2022) country averages: for each country, compute the mean population and mean GDP over these 5 years, then compute the population-weighted mean GDP across countries
 - `alpha` is estimated, constrained to [0.01, 0.99]
 
 **h(T, P)** - Climate response function:
@@ -49,11 +49,20 @@ Parameters: `h0`, `h1`, `h2`, `h3`, `h4` (h0 omitted for non-base variants)
 ```
 j(i, t) = j0[i] + j1[i]*t + j2[i]*t^2
 ```
+For identifiability, the first country is the reference: `j0[0] = j1[0] = j2[0] = 0`
 
 **k(t)** - Year fixed effects:
 ```
-k(t) = k[t]   (with k[first_year] = 0 for identifiability)
+k(t) = k[t]   (all years estimated)
 ```
+
+### Alternative Parameterization (Mean-Centered)
+
+An alternative parameterization is also computed where the j parameters sum to zero across all countries:
+- `j0_mc`, `j1_mc`, `j2_mc`: Mean-centered country effects (sum to zero)
+- `k_mc`: Adjusted year effects to maintain identical predictions
+
+This transformation makes k represent the global mean trend, with j representing country-specific deviations from that mean.
 
 ## Uncertainty Analysis
 
@@ -93,6 +102,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+**Dependencies:** numpy, pandas, matplotlib, scipy, scikit-learn, openpyxl
+
 ## Usage
 
 ### Bootstrap Uncertainty Analysis
@@ -115,15 +126,20 @@ python run_bootstrap.py \
 
 ### Compute Statistics from Existing Results
 
-You can compute summary statistics from a previously-generated bootstrap CSV without re-running the bootstrap:
+You can compute summary statistics from a previously-generated bootstrap file (CSV or XLSX) without re-running the bootstrap:
 
 ```bash
-# Compute stats from existing CSV (output goes to same directory)
-python run_bootstrap.py --from-csv ./data/output/bootstrap_20260118_065142/bootstrap_coefficients_simple.csv
+# Compute stats from existing file (output goes to same directory)
+python run_bootstrap.py --from-file ./data/output/bootstrap_20260118_065142/bootstrap_coefficients_simple.csv
+
+# Also works with XLSX files
+python run_bootstrap.py --from-file ./path/to/bootstrap_coefficients.xlsx
 
 # Specify different output directory
-python run_bootstrap.py --from-csv ./path/to/bootstrap_coefficients_simple.csv --output-dir ./my_stats
+python run_bootstrap.py --from-file ./path/to/bootstrap_coefficients_simple.csv --output-dir ./my_stats
 ```
+
+Note: `--from-csv` is still supported as an alias for backward compatibility.
 
 ### Command Line Options (run_bootstrap.py)
 
@@ -134,7 +150,7 @@ python run_bootstrap.py --from-csv ./path/to/bootstrap_coefficients_simple.csv -
 | `--model-variant` | base | Model variant: base, g_scales_hj, g_scales_all |
 | `--output-dir` | auto | Output directory (default: ./data/output/bootstrap_{timestamp}) |
 | `--data-file` | data/input/df_base_withPop.csv | Input data file |
-| `--from-csv` | none | Compute stats from existing CSV (skips bootstrap) |
+| `--from-file` | none | Compute stats from existing file (CSV or XLSX, skips bootstrap) |
 | `--constrained` | false | Use constrained model with h(T\*, P\*) = 0 |
 
 ## Output Files
@@ -147,8 +163,8 @@ The bootstrap now produces both point estimate outputs and bootstrap-specific ou
 data/output/bootstrap_{timestamp}/
 ├── # Point estimate outputs (same as run_fit.py)
 ├── global_params.json               # GDP0, alpha, h0-h4 with Hessian SEs
-├── country_params.csv               # j0, j1, j2 for each country
-├── year_effects.csv                 # k[t] for each year
+├── country_params.xlsx              # j0, j1, j2 (Sheet 1: original, Sheet 2: mean_centered)
+├── year_effects.xlsx                # k[t] (Sheet 1: original, Sheet 2: mean_centered)
 ├── summary.json/txt                 # Fit statistics (R², RMSE, AIC, BIC)
 ├── diagnostics.png                  # Residual diagnostic plots
 ├── climate_response_*.png           # Climate response visualizations
@@ -160,7 +176,7 @@ data/output/bootstrap_{timestamp}/
 │
 ├── # Bootstrap summary (multiple CI levels, SE on median)
 ├── bootstrap_summary.txt            # Statistics with 2SD/95%/90%/1SD/IQR CIs
-├── bootstrap_stats_from_csv.txt     # (if using --from-csv)
+├── bootstrap_stats_from_file.txt    # (if using --from-file)
 │
 ├── # Bootstrap plots
 ├── bootstrap_h_temperature.png      # h(T) with bootstrap 95% CI
@@ -182,13 +198,21 @@ data/output/bootstrap_{timestamp}/
 ```
 data/output/{timestamp}/
 ├── global_params.json           # GDP0, alpha, h0-h4 with Hessian SEs
-├── country_params.csv           # j0, j1, j2 for each country
-├── year_effects.csv             # k[t] for each year
+├── country_params.xlsx          # j0, j1, j2 (Sheet 1: original, Sheet 2: mean_centered)
+├── year_effects.xlsx            # k[t] (Sheet 1: original, Sheet 2: mean_centered)
 ├── summary.json/txt             # Fit statistics (R², RMSE, AIC, BIC)
 ├── diagnostics.png              # Residual diagnostic plots
 ├── climate_response_*.png       # Climate response visualizations
 └── residuals.csv                # Fitted values and residuals
 ```
+
+**XLSX File Structure:**
+- **country_params.xlsx**:
+  - Sheet "original": `iso_id`, `j0`, `j1`, `j2`, `se_j0`, `se_j1`, `se_j2`
+  - Sheet "mean_centered": `iso_id`, `j0_mc`, `j1_mc`, `j2_mc` (sum to zero)
+- **year_effects.xlsx**:
+  - Sheet "original": `year`, `k`, `se_k`
+  - Sheet "mean_centered": `year`, `k_mc` (adjusted for mean-centering)
 
 ## Project Structure
 
@@ -225,8 +249,8 @@ This ensures reliable convergence by always evaluating the true objective.
 ## Reference Values
 
 Following Burke et al. methodology:
-- **GDP0**: Population-weighted mean per capita GDP (most recent year)
-- **P_const**: Population-weighted mean log-precipitation (for plotting h(T) curves)
+- **GDP0**: Population-weighted mean per capita GDP using 5-year (2018-2022) country averages
+- **P_const**: Population-weighted mean log-precipitation using 5-year (2018-2022) country averages
 - **Temperature range**: 0°C to 30°C (standard for climate-growth plots)
 
 ## Data

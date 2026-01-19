@@ -619,12 +619,13 @@ def save_bootstrap_summary(
     print(f"  Saved: bootstrap_summary.txt")
 
 
-def compute_stats_from_csv(csv_path: Path, output_path: Path) -> None:
-    """Compute bootstrap statistics from an existing CSV file.
+def compute_stats_from_file(file_path: Path, output_path: Path, sheet_name: str = None) -> None:
+    """Compute bootstrap statistics from an existing CSV or XLSX file.
 
     Args:
-        csv_path: Path to bootstrap_coefficients_simple.csv
+        file_path: Path to bootstrap coefficients file (CSV or XLSX)
         output_path: Path to write the summary output
+        sheet_name: Sheet name for XLSX files (optional, defaults to first sheet)
     """
     # Define percentile ranges
     percentile_ranges = [
@@ -647,16 +648,20 @@ def compute_stats_from_csv(csv_path: Path, output_path: Path) -> None:
             lines.append(f"  {name:20s} CI: [{p_lo:{fmt[1:]}}, {p_hi:{fmt[1:]}}]")
         return "\n".join(lines)
 
-    # Read CSV
-    df = pd.read_csv(csv_path)
+    # Read file based on extension
+    suffix = file_path.suffix.lower()
+    if suffix == '.xlsx':
+        df = pd.read_excel(file_path, sheet_name=sheet_name)
+    else:
+        df = pd.read_csv(file_path)
     n_samples = len(df)
 
-    print(f"Read {n_samples} bootstrap samples from {csv_path}")
+    print(f"Read {n_samples} bootstrap samples from {file_path}")
 
     with open(output_path, "w") as f:
-        f.write("Bootstrap Statistics from CSV\n")
+        f.write("Bootstrap Statistics\n")
         f.write("=" * 60 + "\n\n")
-        f.write(f"Source file: {csv_path}\n")
+        f.write(f"Source file: {file_path}\n")
         f.write(f"Number of samples: {n_samples}\n\n")
 
         f.write("Percentile ranges reported:\n")
@@ -750,27 +755,28 @@ def main():
                              "This normalizes the climate response to pass through "
                              "zero at optimal temperature and precipitation. "
                              "Only available for base model variant.")
-    parser.add_argument("--from-csv", type=str, default=None,
-                        help="Compute statistics from existing bootstrap CSV file "
-                             "(e.g., bootstrap_coefficients_simple.csv). "
+    parser.add_argument("--from-file", "--from-csv", type=str, default=None,
+                        dest="from_file",
+                        help="Compute statistics from existing bootstrap file "
+                             "(CSV or XLSX, e.g., bootstrap_coefficients_simple.csv). "
                              "When specified, skips bootstrap and just computes stats.")
     args = parser.parse_args()
 
-    # Handle --from-csv mode
-    if args.from_csv:
-        csv_path = Path(args.from_csv).expanduser()
-        if not csv_path.exists():
-            print(f"Error: File not found: {csv_path}")
+    # Handle --from-file mode (also handles --from-csv for backward compatibility)
+    if args.from_file:
+        file_path = Path(args.from_file).expanduser()
+        if not file_path.exists():
+            print(f"Error: File not found: {file_path}")
             return
 
         # Determine output path
         if args.output_dir:
-            output_path = Path(args.output_dir) / "bootstrap_stats_from_csv.txt"
+            output_path = Path(args.output_dir) / "bootstrap_stats_from_file.txt"
             Path(args.output_dir).mkdir(parents=True, exist_ok=True)
         else:
-            output_path = csv_path.parent / "bootstrap_stats_from_csv.txt"
+            output_path = file_path.parent / "bootstrap_stats_from_file.txt"
 
-        compute_stats_from_csv(csv_path, output_path)
+        compute_stats_from_file(file_path, output_path)
         return
 
     # Create output directory

@@ -38,6 +38,14 @@ class ModelParams:
     # Shape: (n_years,)
     k: np.ndarray
 
+    # Mean-centered j and adjusted k (optional, for alternative parameterization)
+    # In this parameterization: sum(j0_mc) = sum(j1_mc) = sum(j2_mc) = 0
+    # and k_mc is adjusted so predictions are numerically identical
+    j0_mc: Optional[np.ndarray] = None
+    j1_mc: Optional[np.ndarray] = None
+    j2_mc: Optional[np.ndarray] = None
+    k_mc: Optional[np.ndarray] = None
+
     # Standard errors (optional, populated after fitting)
     se_GDP0: Optional[float] = None
     se_alpha: Optional[float] = None
@@ -197,3 +205,34 @@ def predict_from_data(data, params: ModelParams) -> np.ndarray:
         data.pcGDP, data.temp, data.precp, data.time,
         data.country_idx, data.year_idx, params
     )
+
+
+def compute_mean_centered_params(params: ModelParams, n_years: int) -> None:
+    """Compute mean-centered j parameters and adjusted k parameters.
+
+    This transformation re-parameterizes the model so that:
+    - sum(j0_mc) = sum(j1_mc) = sum(j2_mc) = 0
+    - k_mc is adjusted to give numerically identical predictions
+
+    The transformation is:
+        j0_mc[i] = j0[i] - mean(j0)
+        j1_mc[i] = j1[i] - mean(j1)
+        j2_mc[i] = j2[i] - mean(j2)
+        k_mc[t] = k[t] + mean(j0) + mean(j1)*t + mean(j2)*t^2
+
+    This modifies params in place, adding j0_mc, j1_mc, j2_mc, k_mc.
+
+    Args:
+        params: ModelParams object (modified in place)
+        n_years: Number of years (for generating time indices)
+    """
+    m0 = np.mean(params.j0)
+    m1 = np.mean(params.j1)
+    m2 = np.mean(params.j2)
+
+    params.j0_mc = params.j0 - m0
+    params.j1_mc = params.j1 - m1
+    params.j2_mc = params.j2 - m2
+
+    t = np.arange(n_years)
+    params.k_mc = params.k + m0 + m1 * t + m2 * t**2

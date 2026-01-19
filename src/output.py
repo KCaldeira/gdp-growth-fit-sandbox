@@ -36,8 +36,8 @@ def save_parameters(result: FitResult, data: FittingData,
 
     Creates:
         - global_params.json: GDP0, alpha, h0-h4 with SEs
-        - country_params.csv: j0, j1, j2 for each country
-        - year_effects.csv: k for each year
+        - country_params.xlsx: Sheet1=original (j0,j1,j2), Sheet2=mean_centered (j0_mc,j1_mc,j2_mc)
+        - year_effects.xlsx: Sheet1=original (k), Sheet2=mean_centered (k_mc)
     """
     params = result.params
 
@@ -55,34 +55,55 @@ def save_parameters(result: FitResult, data: FittingData,
     with open(output_dir / "global_params.json", "w") as f:
         json.dump(global_params, f, indent=2, default=_json_serializer)
 
-    # Country parameters
-    country_data = []
+    # Country parameters - Sheet 1: Original, Sheet 2: Mean-centered
+    country_data_orig = []
+    country_data_mc = []
     for i in range(data.n_countries):
         iso = data.idx_to_iso[i]
-        row = {
+        row_orig = {
             "iso_id": iso,
             "j0": params.j0[i],
             "j1": params.j1[i],
             "j2": params.j2[i],
         }
+        row_mc = {
+            "iso_id": iso,
+            "j0_mc": params.j0_mc[i] if params.j0_mc is not None else None,
+            "j1_mc": params.j1_mc[i] if params.j1_mc is not None else None,
+            "j2_mc": params.j2_mc[i] if params.j2_mc is not None else None,
+        }
         if params.se_j0 is not None:
-            row["se_j0"] = params.se_j0[i]
-            row["se_j1"] = params.se_j1[i]
-            row["se_j2"] = params.se_j2[i]
-        country_data.append(row)
+            row_orig["se_j0"] = params.se_j0[i]
+            row_orig["se_j1"] = params.se_j1[i]
+            row_orig["se_j2"] = params.se_j2[i]
+        country_data_orig.append(row_orig)
+        country_data_mc.append(row_mc)
 
-    pd.DataFrame(country_data).to_csv(output_dir / "country_params.csv", index=False)
+    df_country_orig = pd.DataFrame(country_data_orig)
+    df_country_mc = pd.DataFrame(country_data_mc)
 
-    # Year effects
-    year_data = []
+    with pd.ExcelWriter(output_dir / "country_params.xlsx", engine='openpyxl') as writer:
+        df_country_orig.to_excel(writer, sheet_name='original', index=False)
+        df_country_mc.to_excel(writer, sheet_name='mean_centered', index=False)
+
+    # Year effects - Sheet 1: Original, Sheet 2: Mean-centered
+    year_data_orig = []
+    year_data_mc = []
     for i in range(data.n_years):
         year = data.idx_to_year[i]
-        row = {"year": year, "k": params.k[i]}
+        row_orig = {"year": year, "k": params.k[i]}
+        row_mc = {"year": year, "k_mc": params.k_mc[i] if params.k_mc is not None else None}
         if params.se_k is not None:
-            row["se_k"] = params.se_k[i]
-        year_data.append(row)
+            row_orig["se_k"] = params.se_k[i]
+        year_data_orig.append(row_orig)
+        year_data_mc.append(row_mc)
 
-    pd.DataFrame(year_data).to_csv(output_dir / "year_effects.csv", index=False)
+    df_year_orig = pd.DataFrame(year_data_orig)
+    df_year_mc = pd.DataFrame(year_data_mc)
+
+    with pd.ExcelWriter(output_dir / "year_effects.xlsx", engine='openpyxl') as writer:
+        df_year_orig.to_excel(writer, sheet_name='original', index=False)
+        df_year_mc.to_excel(writer, sheet_name='mean_centered', index=False)
 
 
 def save_summary(result: FitResult, data: FittingData, output_dir: Path) -> None:
@@ -466,7 +487,7 @@ def save_optimization_results(result: FitResult, data: FittingData,
             'b-', linewidth=2, marker='o', markersize=6)
     ax.set_xlabel('Alpha')
     ax.set_ylabel('Objective (Sum of Squared Residuals)')
-    ax.set_title(f'Alpha Optimization Path (Brent\'s Method)\n(GDP0 = {data.pop_weighted_mean_gdp:.0f}, {data.gdp0_reference_year})')
+    ax.set_title(f'Alpha Optimization Path (Brent\'s Method)\n(GDP0 = {data.pop_weighted_mean_gdp:.0f}, {data.gdp0_reference_years[0]}-{data.gdp0_reference_years[1]})')
     ax.grid(True, alpha=0.3)
 
     # Mark minimum
@@ -506,8 +527,8 @@ def save_all_outputs(result: FitResult, data: FittingData,
     save_optimization_results(result, data, output_dir)
 
     print("  - global_params.json")
-    print("  - country_params.csv")
-    print("  - year_effects.csv")
+    print("  - country_params.xlsx (2 sheets: original, mean_centered)")
+    print("  - year_effects.xlsx (2 sheets: original, mean_centered)")
     print("  - summary.json / summary.txt")
     print("  - diagnostics.png")
     print("  - convergence.png")

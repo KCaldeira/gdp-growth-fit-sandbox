@@ -126,7 +126,7 @@ def create_bootstrap_data(
         n_years=len(unique_years_in_sample),
         pop_weighted_mean_gdp=data.pop_weighted_mean_gdp,
         pop_weighted_mean_precp=data.pop_weighted_mean_precp,
-        gdp0_reference_year=data.gdp0_reference_year,
+        gdp0_reference_years=data.gdp0_reference_years,
     )
 
 
