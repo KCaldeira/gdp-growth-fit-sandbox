@@ -141,6 +141,20 @@ python run_bootstrap.py --from-file ./path/to/bootstrap_coefficients_simple.csv 
 
 Note: `--from-csv` is still supported as an alias for backward compatibility.
 
+### Plot GDP-Temperature Curvature Effect
+
+Generate a 2×5 panel plot showing the GDP-scaled temperature curvature effect `g(GDP) × h₂ × (T - T*)²` and its derivative for different GDP percentiles:
+
+```bash
+# Use most recent bootstrap directory (default)
+python plot_gdp_temperature_curvature.py
+
+# Specify a specific bootstrap directory
+python plot_gdp_temperature_curvature.py data/output/bootstrap_20260119_084350
+```
+
+Output: `gdp_temperature_curvature.png` saved to the bootstrap directory.
+
 ### Command Line Options (run_bootstrap.py)
 
 | Option | Default | Description |
@@ -231,6 +245,7 @@ gdp-growth-fit-sandbox/
 ├── scripts/
 │   └── run_fit.py               # Basic fitting entry point
 ├── run_bootstrap.py             # Bootstrap analysis entry point
+├── plot_gdp_temperature_curvature.py  # GDP-scaled curvature effect plot
 ├── requirements.txt
 ├── CLAUDE.md                    # Coding style guide
 └── README.md
