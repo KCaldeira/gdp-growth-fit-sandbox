@@ -62,6 +62,11 @@ def parse_args():
         type=Path,
         help="Bootstrap output directory (default: most recent ./data/output/bootstrap*)",
     )
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        help="Maximum number of bootstrap samples to use (default: all)",
+    )
     return parser.parse_args()
 
 
@@ -75,8 +80,6 @@ def main():
         bootstrap_dir = find_most_recent_bootstrap_dir()
         print(f"Using most recent bootstrap directory: {bootstrap_dir}")
 
-    output_file = bootstrap_dir / "gdp_temperature_curvature.png"
-
     # Load point estimates
     with open(bootstrap_dir / "global_params.json") as f:
         params = json.load(f)
@@ -88,6 +91,16 @@ def main():
 
     # Load bootstrap samples
     df_boot = pd.read_csv(bootstrap_dir / "bootstrap_coefficients_simple.csv")
+
+    # Limit number of samples if requested
+    if args.max_samples is not None and args.max_samples < len(df_boot):
+        df_boot = df_boot.iloc[: args.max_samples]
+        n_samples_used = args.max_samples
+        output_file = bootstrap_dir / f"gdp_temperature_curvature_n{n_samples_used}.png"
+    else:
+        n_samples_used = len(df_boot)
+        output_file = bootstrap_dir / "gdp_temperature_curvature.png"
+
     alpha_samples = df_boot["alpha"].values
     h1_samples = df_boot["h1"].values
     h2_samples = df_boot["h2"].values
@@ -176,7 +189,7 @@ def main():
 
     # Add overall title
     fig.suptitle(
-        f"GDP-scaled Temperature Curvature Effect (90% bootstrap CI)\n"
+        f"GDP-scaled Temperature Curvature Effect (90% bootstrap CI, n={n_samples_used})\n"
         f"Red line: T* = {Topt_point:.1f}°C",
         fontsize=12,
         y=0.98,
