@@ -2,8 +2,8 @@
 
 import pandas as pd
 import numpy as np
-from dataclasses import dataclass
-from typing import Dict
+from dataclasses import dataclass, field
+from typing import Dict, Optional
 
 
 @dataclass
@@ -19,28 +19,36 @@ class FittingData:
     year_idx: np.ndarray      # Year index for each observation
     pop: np.ndarray           # Population
 
+    # Lagged values (for "level" model variant)
+    # These are None when compute_lags=False, populated when compute_lags=True
+    pcGDP_lag: Optional[np.ndarray] = None   # Per capita GDP lagged by 1 year
+    temp_lag: Optional[np.ndarray] = None    # Temperature lagged by 1 year
+    precp_lag: Optional[np.ndarray] = None   # Log precipitation lagged by 1 year
+
     # Mappings
-    iso_to_idx: Dict[str, int]   # iso_id -> country index
-    idx_to_iso: Dict[int, str]   # country index -> iso_id
-    year_to_idx: Dict[int, int]  # year -> year index
-    idx_to_year: Dict[int, int]  # year index -> year
+    iso_to_idx: Dict[str, int] = field(default_factory=dict)   # iso_id -> country index
+    idx_to_iso: Dict[int, str] = field(default_factory=dict)   # country index -> iso_id
+    year_to_idx: Dict[int, int] = field(default_factory=dict)  # year -> year index
+    idx_to_year: Dict[int, int] = field(default_factory=dict)  # year index -> year
 
     # Dimensions
-    n_obs: int
-    n_countries: int
-    n_years: int
+    n_obs: int = 0
+    n_countries: int = 0
+    n_years: int = 0
 
     # Derived values
-    pop_weighted_mean_gdp: float     # Population-weighted mean of pcGDP (5-year country means)
-    pop_weighted_mean_precp: float   # Population-weighted mean of log-precipitation (5-year country means)
-    gdp0_reference_years: tuple      # Years used for GDP0 and P0 calculation (e.g., (2018, 2022))
+    pop_weighted_mean_gdp: float = 0.0     # Population-weighted mean of pcGDP (5-year country means)
+    pop_weighted_mean_precp: float = 0.0   # Population-weighted mean of log-precipitation (5-year country means)
+    gdp0_reference_years: tuple = (2018, 2022)  # Years used for GDP0 and P0 calculation
 
 
-def load_data(csv_path: str) -> FittingData:
+def load_data(csv_path: str, compute_lags: bool) -> FittingData:
     """Load and preprocess data from CSV file.
 
     Args:
         csv_path: Path to the input CSV file
+        compute_lags: If True, compute lagged values (pcGDP_lag, temp_lag, precp_lag)
+                      for the "level" model variant and drop first observation per country.
 
     Returns:
         FittingData object containing all arrays and mappings
@@ -92,6 +100,38 @@ def load_data(csv_path: str) -> FittingData:
     pop_weighted_mean_gdp = np.sum(country_gdp * country_pop) / np.sum(country_pop)
     pop_weighted_mean_precp = np.sum(country_precp * country_pop) / np.sum(country_pop)
 
+    # Initialize lagged values
+    pcGDP_lag = None
+    temp_lag = None
+    precp_lag = None
+
+    if compute_lags:
+        # Sort by country and year to ensure proper lag computation
+        df_sorted = df.sort_values(['iso_id', 'year']).reset_index(drop=True)
+
+        # Compute lagged values within each country using groupby.shift(1)
+        df_sorted['pcGDP_lag'] = df_sorted.groupby('iso_id')['pcGDP'].shift(1)
+        df_sorted['temp_lag'] = df_sorted.groupby('iso_id')['temp'].shift(1)
+        df_sorted['precp_lag'] = df_sorted.groupby('iso_id')['precp'].shift(1)
+
+        # Drop first observation per country (where lag is NaN)
+        df_sorted = df_sorted.dropna(subset=['pcGDP_lag', 'temp_lag', 'precp_lag'])
+
+        # Re-extract arrays from filtered dataframe
+        growth_pcGDP = df_sorted['growth_pcGDP'].values.astype(np.float64)
+        pcGDP = df_sorted['pcGDP'].values.astype(np.float64)
+        temp = df_sorted['temp'].values.astype(np.float64)
+        precp = df_sorted['precp'].values.astype(np.float64)
+        time = df_sorted['time'].values.astype(np.float64)
+        pop = df_sorted['Pop'].values.astype(np.float64)
+        country_idx = df_sorted['iso_id'].map(iso_to_idx).values.astype(np.int32)
+        year_idx = df_sorted['year'].map(year_to_idx).values.astype(np.int32)
+
+        # Extract lagged values
+        pcGDP_lag = df_sorted['pcGDP_lag'].values.astype(np.float64)
+        temp_lag = df_sorted['temp_lag'].values.astype(np.float64)
+        precp_lag = df_sorted['precp_lag'].values.astype(np.float64)
+
     return FittingData(
         growth_pcGDP=growth_pcGDP,
         pcGDP=pcGDP,
@@ -101,6 +141,9 @@ def load_data(csv_path: str) -> FittingData:
         country_idx=country_idx,
         year_idx=year_idx,
         pop=pop,
+        pcGDP_lag=pcGDP_lag,
+        temp_lag=temp_lag,
+        precp_lag=precp_lag,
         iso_to_idx=iso_to_idx,
         idx_to_iso=idx_to_iso,
         year_to_idx=year_to_idx,

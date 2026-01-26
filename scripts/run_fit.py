@@ -28,6 +28,13 @@ def main():
         help="Output directory (default: timestamped subdirectory of data/output)"
     )
     parser.add_argument(
+        "--model-variant", "-m",
+        default="growth",
+        choices=["growth", "level"],
+        help="Model variant: growth (g[t]*h[t] + j + k), "
+             "level (g[t]*h[t] - g[t-1]*h[t-1] + j + k) (default: growth)"
+    )
+    parser.add_argument(
         "--quiet", "-q",
         action="store_true",
         help="Suppress progress output"
@@ -35,16 +42,20 @@ def main():
 
     args = parser.parse_args()
 
-    # Load data
+    # Load data (compute lags for "level" model variant)
+    compute_lags = (args.model_variant == "level")
     print(f"Loading data from {args.input}...")
-    data = load_data(args.input)
+    data = load_data(args.input, compute_lags=compute_lags)
     print(f"  Loaded {data.n_obs} observations, "
           f"{data.n_countries} countries, {data.n_years} years")
+    if compute_lags:
+        print(f"  (Lagged data computed for 'level' model variant)")
 
     # Fit model
     print("\nFitting model...")
     result = fit_model(
         data,
+        model_variant=args.model_variant,
         verbose=not args.quiet,
     )
 

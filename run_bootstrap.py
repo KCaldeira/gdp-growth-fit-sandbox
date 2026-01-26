@@ -745,11 +745,10 @@ def main():
                         help="Output directory (default: ./data/output/bootstrap_TIMESTAMP)")
     parser.add_argument("--data-file", type=str, default="data/input/df_base_withPop.csv",
                         help="Input data file")
-    parser.add_argument("--model-variant", type=str, default="base",
-                        choices=["base", "g_scales_hj", "g_scales_all"],
-                        help="Model variant: base (g*h + j + k), "
-                             "g_scales_hj (g*(h+j) + k), "
-                             "g_scales_all (g*(h+j+k)) (default: base)")
+    parser.add_argument("--model-variant", type=str, default="growth",
+                        choices=["growth", "level"],
+                        help="Model variant: growth (g[t]*h[t] + j + k), "
+                             "level (g[t]*h[t] - g[t-1]*h[t-1] + j + k) (default: growth)")
     parser.add_argument("--constrained", action="store_true",
                         help="Use constrained model with h(T*, P*) = 0. "
                              "This normalizes the climate response to pass through "
@@ -791,20 +790,20 @@ def main():
     print("Cluster Bootstrap Uncertainty Analysis")
     print("=" * 60)
 
-    # Validate constrained flag
-    if args.constrained and args.model_variant != "base":
-        print("Error: --constrained is only available for base model variant")
-        return
-
-    # Load data
+    # Load data (compute lags for "level" model variant)
+    compute_lags = (args.model_variant == "level")
     print(f"\nLoading data from {args.data_file}...")
-    data = load_data(args.data_file)
+    data = load_data(args.data_file, compute_lags=compute_lags)
     print(f"  N={data.n_obs}, countries={data.n_countries}, years={data.n_years}")
+    if compute_lags:
+        print(f"  (Lagged data computed for 'level' model variant)")
 
     # Fit model
     print("\nFitting model...")
     if args.constrained:
-        fit_result = fit_model_constrained(data, verbose=True)
+        fit_result = fit_model_constrained(
+            data, model_variant=args.model_variant, verbose=True
+        )
         T_opt_point = fit_result.T_opt
         P_opt_point = fit_result.P_opt
     else:

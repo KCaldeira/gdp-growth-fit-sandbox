@@ -54,7 +54,7 @@ class BootstrapResult:
     # Metadata
     n_bootstrap: int
     n_successful: int  # number of successful bootstrap fits
-    model_variant: str  # "base", "g_scales_hj", or "g_scales_all"
+    model_variant: str  # "growth" or "level"
     n_countries: int   # number of countries (for interpreting j samples)
     n_years: int       # number of years (for interpreting k samples)
 
@@ -101,6 +101,11 @@ def create_bootstrap_data(
     year_idx = data.year_idx[obs_indices]
     pop = data.pop[obs_indices]
 
+    # Extract lagged values if present in original data
+    pcGDP_lag = data.pcGDP_lag[obs_indices] if data.pcGDP_lag is not None else None
+    temp_lag = data.temp_lag[obs_indices] if data.temp_lag is not None else None
+    precp_lag = data.precp_lag[obs_indices] if data.precp_lag is not None else None
+
     # Remap year indices to be contiguous (in case some years are missing)
     unique_years_in_sample = np.unique(year_idx)
     year_remap = {old: new for new, old in enumerate(unique_years_in_sample)}
@@ -117,6 +122,9 @@ def create_bootstrap_data(
         country_idx=new_country_idx,
         year_idx=new_year_idx,
         pop=pop,
+        pcGDP_lag=pcGDP_lag,
+        temp_lag=temp_lag,
+        precp_lag=precp_lag,
         iso_to_idx={},  # Not needed for fitting
         idx_to_iso={},
         year_to_idx={},
@@ -146,9 +154,19 @@ def fit_bootstrap_sample(
             return 1e20
 
         g_values = g_func(boot_data.pcGDP, GDP0, alpha)
-        h_params, j0, j1, j2, k = solve_linear_subproblem(boot_data, g_values, model_variant)
 
-        pred = compute_predictions(boot_data, g_values, h_params, j0, j1, j2, k, model_variant)
+        # Compute lagged g values for "level" model
+        g_values_lag = None
+        if model_variant == "level":
+            g_values_lag = g_func(boot_data.pcGDP_lag, GDP0, alpha)
+
+        h_params, j0, j1, j2, k = solve_linear_subproblem(
+            boot_data, g_values, model_variant, g_values_lag
+        )
+
+        pred = compute_predictions(
+            boot_data, g_values, h_params, j0, j1, j2, k, model_variant, g_values_lag
+        )
         residuals = boot_data.growth_pcGDP - pred
 
         return np.sum(residuals**2)
@@ -165,7 +183,15 @@ def fit_bootstrap_sample(
 
     # Get all parameters at optimal alpha
     g_values = g_func(boot_data.pcGDP, GDP0, alpha)
-    h_params, j0, j1, j2, k = solve_linear_subproblem(boot_data, g_values, model_variant)
+
+    # Compute lagged g values for "level" model
+    g_values_lag = None
+    if model_variant == "level":
+        g_values_lag = g_func(boot_data.pcGDP_lag, GDP0, alpha)
+
+    h_params, j0, j1, j2, k = solve_linear_subproblem(
+        boot_data, g_values, model_variant, g_values_lag
+    )
 
     return alpha, h_params, j0, j1, j2, k
 
@@ -178,6 +204,7 @@ def fit_bootstrap_sample_constrained(
     alpha_init: float,
     T_opt_init: float,
     P_opt_init: float,
+    model_variant: str,
 ) -> Tuple[float, float, float, float, float]:
     """Fit constrained model to a bootstrap sample.
 
@@ -192,6 +219,7 @@ def fit_bootstrap_sample_constrained(
         alpha_init: Initial guess for alpha (from point estimate)
         T_opt_init: Initial guess for T_opt (from point estimate)
         P_opt_init: Initial guess for P_opt (from point estimate)
+        model_variant: "growth" or "level"
 
     Returns:
         alpha, T_opt, P_opt, h2, h4
@@ -204,12 +232,19 @@ def fit_bootstrap_sample_constrained(
             return 1e20
 
         g_values = g_func(boot_data.pcGDP, GDP0, alpha)
+
+        # Compute lagged g values for "level" model
+        g_values_lag = None
+        if model_variant == "level":
+            g_values_lag = g_func(boot_data.pcGDP_lag, GDP0, alpha)
+
         h2, h4, j0, j1, j2, k = solve_constrained_subproblem(
-            boot_data, g_values, T_opt, P_opt
+            boot_data, g_values, T_opt, P_opt, model_variant, g_values_lag
         )
 
         pred = compute_constrained_predictions(
-            boot_data, g_values, T_opt, P_opt, h2, h4, j0, j1, j2, k
+            boot_data, g_values, T_opt, P_opt, h2, h4, j0, j1, j2, k,
+            model_variant, g_values_lag
         )
         residuals = boot_data.growth_pcGDP - pred
 
@@ -232,8 +267,14 @@ def fit_bootstrap_sample_constrained(
 
     # Get h2, h4 at optimal parameters
     g_values = g_func(boot_data.pcGDP, GDP0, alpha)
+
+    # Compute lagged g values for "level" model
+    g_values_lag = None
+    if model_variant == "level":
+        g_values_lag = g_func(boot_data.pcGDP_lag, GDP0, alpha)
+
     h2, h4, _, _, _, _ = solve_constrained_subproblem(
-        boot_data, g_values, T_opt, P_opt
+        boot_data, g_values, T_opt, P_opt, model_variant, g_values_lag
     )
 
     return alpha, T_opt, P_opt, h2, h4
@@ -321,6 +362,7 @@ def run_bootstrap(
                     alpha_init=params.alpha,
                     T_opt_init=T_opt_point,
                     P_opt_init=P_opt_point,
+                    model_variant=model_variant,
                 )
                 # Convert to unconstrained h parameters for storage
                 h0_b, h1_b, _, h3_b, _ = constrained_to_unconstrained_h(

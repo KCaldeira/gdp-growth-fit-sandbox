@@ -1,6 +1,15 @@
 """Model component functions for GDP growth curve fitting.
 
-Model: growth_pcGDP(i,t) = g(pcGDP[i,t]) * h(T[i,t], P[i,t]) + j(i,t) + k(t)
+Two model variants are supported:
+
+"growth" model (default):
+    dy[t] = g(GDP[t]) * h(T[t], P[t]) + j(i,t) + k(t)
+    Standard growth model where climate effect scales with GDP.
+
+"level" model:
+    dy[t] = g(GDP[t])*h(T[t],P[t]) - g(GDP[t-1])*h(T[t-1],P[t-1]) + j(i,t) + k(t)
+    Level model that fits the *difference* of climate impacts between consecutive years.
+    This model requires lagged data (computed via load_data with compute_lags=True).
 
 Where:
     g(GDP) = (GDP / GDP0)^(-alpha)

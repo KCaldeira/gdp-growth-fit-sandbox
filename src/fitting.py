@@ -7,10 +7,15 @@ We use profile likelihood optimization:
 3. Minimize over alpha using grid search + Brent's method
 4. GDP0 is fixed to population-weighted mean GDP
 
-Three model variants are supported:
-- "base":         growth = g*h + j + k           (5 h params: h0, h1, h2, h3, h4)
-- "g_scales_hj":  growth = g*(h + j) + k         (4 h params: h1, h2, h3, h4; h0 absorbed into j0)
-- "g_scales_all": growth = g*(h + j + k)         (4 h params: h1, h2, h3, h4; h0 absorbed into j0)
+Two model variants are supported:
+- "growth": dy = g(GDP[t])*h(T[t],P[t]) + j + k
+            Standard growth model where climate effect scales with GDP.
+            (5 h params: h0, h1, h2, h3, h4)
+
+- "level":  dy = g(GDP[t])*h(T[t],P[t]) - g(GDP[t-1])*h(T[t-1],P[t-1]) + j + k
+            Level model that fits the *difference* of climate impacts between
+            consecutive years. This model requires lagged data.
+            (5 h params: h0, h1, h2, h3, h4)
 
 This approach is superior to alternating estimation because it always
 evaluates the true objective for each alpha candidate.
@@ -31,7 +36,7 @@ from .data_loader import FittingData
 
 
 # Valid model variants
-MODEL_VARIANTS = ["base", "g_scales_hj", "g_scales_all"]
+MODEL_VARIANTS = ["growth", "level"]
 
 
 @dataclass
@@ -46,7 +51,7 @@ class FitResult:
     n_iterations: int
     converged: bool
     objective_history: list
-    model_variant: str  # "base", "g_scales_hj", or "g_scales_all"
+    model_variant: str  # "growth" or "level"
     # Grid search results (if performed)
     grid_search_alphas: Optional[np.ndarray] = None
     grid_search_objectives: Optional[np.ndarray] = None
@@ -60,25 +65,31 @@ def build_linear_design_matrix(
     data: FittingData,
     g_values: np.ndarray,
     model_variant: str,
+    g_values_lag: Optional[np.ndarray],
 ) -> np.ndarray:
     """Build design matrix for linear subproblem given fixed g values.
 
     Model variants:
-        "base":         y = g*h0 + g*h1*T + g*h2*T^2 + g*h3*P + g*h4*P^2 + j + k
-        "g_scales_hj":  y = g*h1*T + g*h2*T^2 + g*h3*P + g*h4*P^2 + g*j + k
-        "g_scales_all": y = g*h1*T + g*h2*T^2 + g*h3*P + g*h4*P^2 + g*j + g*k
+        "growth": y = g*h0 + g*h1*T + g*h2*T^2 + g*h3*P + g*h4*P^2 + j + k
+        "level":  y = (g[t]-g[t-1])*h0 + (g[t]*T[t]-g[t-1]*T[t-1])*h1 + ... + j + k
 
-    For g_scales_hj and g_scales_all, h0 is absorbed into j0.
     We drop j0[0] = j1[0] = j2[0] = 0 for identifiability (first country is reference).
 
-    Returns design matrix X.
+    Args:
+        data: FittingData object
+        g_values: g(GDP[t]) values for current period
+        model_variant: "growth" or "level"
+        g_values_lag: g(GDP[t-1]) values for lagged period (required for "level")
+
+    Returns:
+        Design matrix X
     """
     n = data.n_obs
     n_countries = data.n_countries
     n_years = data.n_years
 
-    # h parameters
-    if model_variant == "base":
+    # h parameters (5 columns for both variants)
+    if model_variant == "growth":
         # 5 columns: g, g*T, g*T^2, g*P, g*P^2
         X_h = np.column_stack([
             g_values,
@@ -87,37 +98,32 @@ def build_linear_design_matrix(
             g_values * data.precp,
             g_values * data.precp**2,
         ])
-    else:
-        # 4 columns: g*T, g*T^2, g*P, g*P^2 (no h0)
+    else:  # "level"
+        # Differenced h columns: (g[t]*x[t] - g[t-1]*x[t-1]) for each term
         X_h = np.column_stack([
-            g_values * data.temp,
-            g_values * data.temp**2,
-            g_values * data.precp,
-            g_values * data.precp**2,
+            g_values - g_values_lag,                                              # h0
+            g_values * data.temp - g_values_lag * data.temp_lag,                  # h1
+            g_values * data.temp**2 - g_values_lag * data.temp_lag**2,            # h2
+            g_values * data.precp - g_values_lag * data.precp_lag,                # h3
+            g_values * data.precp**2 - g_values_lag * data.precp_lag**2,          # h4
         ])
 
     # j parameters: 3 * (n_countries - 1) columns (drop j[0] for identifiability)
-    # For model variants, j may be scaled by g
-    scale_j = g_values if model_variant in ["g_scales_hj", "g_scales_all"] else np.ones(n)
-
+    # j columns are the same for both variants (not differenced)
     X_j = np.zeros((n, 3 * (n_countries - 1)))
     for obs_idx in range(n):
         i = data.country_idx[obs_idx]
         if i > 0:  # Skip country 0 (reference country)
             t = data.time[obs_idx]
-            s = scale_j[obs_idx]
-            X_j[obs_idx, i - 1] = s                           # j0[i] (possibly scaled by g)
-            X_j[obs_idx, (n_countries - 1) + (i - 1)] = s * t  # j1[i] * t
-            X_j[obs_idx, 2 * (n_countries - 1) + (i - 1)] = s * t**2  # j2[i] * t^2
+            X_j[obs_idx, i - 1] = 1.0                           # j0[i]
+            X_j[obs_idx, (n_countries - 1) + (i - 1)] = t       # j1[i] * t
+            X_j[obs_idx, 2 * (n_countries - 1) + (i - 1)] = t**2  # j2[i] * t^2
 
     # k parameters: n_years columns (all years estimated)
-    # For g_scales_all, k is scaled by g
-    scale_k = g_values if model_variant == "g_scales_all" else np.ones(n)
-
     X_k = np.zeros((n, n_years))
     for obs_idx in range(n):
         y = data.year_idx[obs_idx]
-        X_k[obs_idx, y] = scale_k[obs_idx]
+        X_k[obs_idx, y] = 1.0
 
     # Combine all columns
     X = np.hstack([X_h, X_j, X_k])
@@ -129,20 +135,26 @@ def solve_linear_subproblem(
     data: FittingData,
     g_values: np.ndarray,
     model_variant: str,
+    g_values_lag: Optional[np.ndarray],
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Solve for h, j, k parameters given fixed g values.
 
     Uses ordinary least squares.
 
+    Args:
+        data: FittingData object
+        g_values: g(GDP[t]) values for current period
+        model_variant: "growth" or "level"
+        g_values_lag: g(GDP[t-1]) values for lagged period (required for "level")
+
     Returns:
-        h_params: array of shape (5,) for base, (4,) for other variants
-                  For non-base variants, h0 is set to 0.0 and h_params = [0, h1, h2, h3, h4]
+        h_params: array of shape (5,)
         j0, j1, j2: arrays of shape (n_countries,) with j[0] = 0 (first country is reference)
         k: array of shape (n_years,)
     """
     from scipy import linalg
 
-    X = build_linear_design_matrix(data, g_values, model_variant)
+    X = build_linear_design_matrix(data, g_values, model_variant, g_values_lag)
     y = data.growth_pcGDP
 
     beta, residuals, rank, s = linalg.lstsq(X, y, cond=None, lapack_driver='gelsy')
@@ -150,13 +162,8 @@ def solve_linear_subproblem(
     n_countries = data.n_countries
     n_years = data.n_years
 
-    if model_variant == "base":
-        n_h = 5
-        h_params = beta[:5]
-    else:
-        n_h = 4
-        # Return h_params as [0, h1, h2, h3, h4] for consistency
-        h_params = np.concatenate([[0.0], beta[:4]])
+    n_h = 5
+    h_params = beta[:5]
 
     n_j = n_countries - 1  # Number of estimated j parameters per coefficient
 
@@ -213,24 +220,35 @@ def compute_predictions(
     j2: np.ndarray,
     k: np.ndarray,
     model_variant: str,
+    g_values_lag: Optional[np.ndarray],
 ) -> np.ndarray:
     """Compute predictions for a given model variant.
 
     Model variants:
-        "base":         pred = g*h + j + k
-        "g_scales_hj":  pred = g*(h + j) + k
-        "g_scales_all": pred = g*(h + j + k)
+        "growth": pred = g[t]*h[t] + j + k
+        "level":  pred = g[t]*h[t] - g[t-1]*h[t-1] + j + k
+
+    Args:
+        data: FittingData object
+        g_values: g(GDP[t]) values for current period
+        h_params: [h0, h1, h2, h3, h4]
+        j0, j1, j2: country-specific trend parameters
+        k: year fixed effects
+        model_variant: "growth" or "level"
+        g_values_lag: g(GDP[t-1]) values for lagged period (required for "level")
+
+    Returns:
+        Predicted growth values
     """
     h_vals = h_func(data.temp, data.precp, *h_params)
     j_vals = j_func(data.country_idx, data.time, j0, j1, j2)
     k_vals = k_func(data.year_idx, k)
 
-    if model_variant == "base":
+    if model_variant == "growth":
         return g_values * h_vals + j_vals + k_vals
-    elif model_variant == "g_scales_hj":
-        return g_values * (h_vals + j_vals) + k_vals
-    else:  # g_scales_all
-        return g_values * (h_vals + j_vals + k_vals)
+    else:  # "level"
+        h_vals_lag = h_func(data.temp_lag, data.precp_lag, *h_params)
+        return g_values * h_vals - g_values_lag * h_vals_lag + j_vals + k_vals
 
 
 def objective_for_alpha(
@@ -248,9 +266,19 @@ def objective_for_alpha(
         return 1e20
 
     g_values = g_func(data.pcGDP, GDP0, alpha)
-    h_params, j0, j1, j2, k = solve_linear_subproblem(data, g_values, model_variant)
 
-    pred = compute_predictions(data, g_values, h_params, j0, j1, j2, k, model_variant)
+    # Compute lagged g values for "level" model
+    g_values_lag = None
+    if model_variant == "level":
+        g_values_lag = g_func(data.pcGDP_lag, GDP0, alpha)
+
+    h_params, j0, j1, j2, k = solve_linear_subproblem(
+        data, g_values, model_variant, g_values_lag
+    )
+
+    pred = compute_predictions(
+        data, g_values, h_params, j0, j1, j2, k, model_variant, g_values_lag
+    )
     residuals = data.growth_pcGDP - pred
 
     return np.sum(residuals**2)
@@ -282,9 +310,8 @@ def fit_model(
 
     # Model variant descriptions
     variant_desc = {
-        "base": "g*h + j + k",
-        "g_scales_hj": "g*(h + j) + k",
-        "g_scales_all": "g*(h + j + k)",
+        "growth": "g[t]*h[t] + j + k",
+        "level": "g[t]*h[t] - g[t-1]*h[t-1] + j + k",
     }
 
     if verbose:
@@ -335,7 +362,15 @@ def fit_model(
 
     # Final solve for linear parameters with converged alpha
     g_values = g_func(data.pcGDP, GDP0, alpha)
-    h_params, j0, j1, j2, k = solve_linear_subproblem(data, g_values, model_variant)
+
+    # Compute lagged g values for "level" model
+    g_values_lag = None
+    if model_variant == "level":
+        g_values_lag = g_func(data.pcGDP_lag, GDP0, alpha)
+
+    h_params, j0, j1, j2, k = solve_linear_subproblem(
+        data, g_values, model_variant, g_values_lag
+    )
 
     # Compute final predictions and residuals
     params = ModelParams(
@@ -345,7 +380,9 @@ def fit_model(
         j0=j0, j1=j1, j2=j2, k=k,
     )
 
-    predictions = compute_predictions(data, g_values, h_params, j0, j1, j2, k, model_variant)
+    predictions = compute_predictions(
+        data, g_values, h_params, j0, j1, j2, k, model_variant, g_values_lag
+    )
     residuals = data.growth_pcGDP - predictions
 
     # Compute fit statistics
@@ -355,8 +392,8 @@ def fit_model(
     rmse = np.sqrt(ss_res / data.n_obs)
 
     # AIC/BIC (assuming Gaussian errors)
-    # For non-base variants, h0 is absorbed so we have 4 h params instead of 5
-    n_h_params = 5 if model_variant == "base" else 4
+    # Both variants have 5 h params
+    n_h_params = 5
     n_params = 1 + n_h_params + 3 * (data.n_countries - 1) + data.n_years
     log_likelihood = -data.n_obs / 2 * (np.log(2 * np.pi * ss_res / data.n_obs) + 1)
     aic = 2 * n_params - 2 * log_likelihood
@@ -401,19 +438,25 @@ def build_constrained_design_matrix_sparse(
     g_values: np.ndarray,
     T_opt: float,
     P_opt: float,
+    model_variant: str,
+    g_values_lag: Optional[np.ndarray],
 ):
     """Build sparse design matrix for constrained model with fixed T_opt, P_opt.
 
-    Model: y = g*h2*(T - T_opt)^2 + g*h4*(P - P_opt)^2 + j + k
+    Model variants:
+        "growth": y = g*h2*(T - T_opt)^2 + g*h4*(P - P_opt)^2 + j + k
+        "level":  y = [g[t]*(T[t]-T_opt)^2 - g[t-1]*(T[t-1]-T_opt)^2]*h2 + ... + j + k
 
     Uses sparse representation for j and k columns (which are mostly zeros)
     for much faster least squares solving.
 
     Args:
         data: FittingData object
-        g_values: Precomputed g(GDP) values for each observation
+        g_values: Precomputed g(GDP[t]) values for each observation
         T_opt: Optimal temperature
         P_opt: Optimal precipitation
+        model_variant: "growth" or "level"
+        g_values_lag: Precomputed g(GDP[t-1]) values (required for "level")
 
     Returns:
         Sparse CSR design matrix X
@@ -425,10 +468,17 @@ def build_constrained_design_matrix_sparse(
     n_years = data.n_years
 
     # h parameters: 2 dense columns for h2 and h4
-    X_h = np.column_stack([
-        g_values * (data.temp - T_opt)**2,   # h2 column
-        g_values * (data.precp - P_opt)**2,  # h4 column
-    ])
+    if model_variant == "growth":
+        X_h = np.column_stack([
+            g_values * (data.temp - T_opt)**2,   # h2 column
+            g_values * (data.precp - P_opt)**2,  # h4 column
+        ])
+    else:  # "level"
+        # Differenced columns
+        X_h = np.column_stack([
+            g_values * (data.temp - T_opt)**2 - g_values_lag * (data.temp_lag - T_opt)**2,    # h2
+            g_values * (data.precp - P_opt)**2 - g_values_lag * (data.precp_lag - P_opt)**2,  # h4
+        ])
 
     # j parameters: skip country 0 (reference country)
     mask_j = data.country_idx > 0
@@ -466,6 +516,8 @@ def solve_constrained_subproblem(
     g_values: np.ndarray,
     T_opt: float,
     P_opt: float,
+    model_variant: str,
+    g_values_lag: Optional[np.ndarray],
 ) -> Tuple[float, float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Solve for h2, h4, j, k given fixed alpha, T_opt, P_opt.
 
@@ -473,16 +525,20 @@ def solve_constrained_subproblem(
 
     Args:
         data: FittingData object
-        g_values: Precomputed g(GDP) values
+        g_values: Precomputed g(GDP[t]) values
         T_opt: Optimal temperature
         P_opt: Optimal precipitation
+        model_variant: "growth" or "level"
+        g_values_lag: Precomputed g(GDP[t-1]) values (required for "level")
 
     Returns:
         h2, h4, j0, j1, j2, k
     """
     from scipy.sparse.linalg import lsqr
 
-    X = build_constrained_design_matrix_sparse(data, g_values, T_opt, P_opt)
+    X = build_constrained_design_matrix_sparse(
+        data, g_values, T_opt, P_opt, model_variant, g_values_lag
+    )
     y = data.growth_pcGDP
 
     # LSQR is an iterative solver efficient for sparse least squares
@@ -523,22 +579,33 @@ def compute_constrained_predictions(
     j1: np.ndarray,
     j2: np.ndarray,
     k: np.ndarray,
+    model_variant: str,
+    g_values_lag: Optional[np.ndarray],
 ) -> np.ndarray:
     """Compute predictions for constrained model.
 
-    pred = g * h2 * (T - T_opt)^2 + g * h4 * (P - P_opt)^2 + j + k
+    Model variants:
+        "growth": pred = g[t] * h(T[t], P[t]) + j + k
+        "level":  pred = g[t] * h(T[t], P[t]) - g[t-1] * h(T[t-1], P[t-1]) + j + k
+
+    Where h(T, P) = h2 * (T - T_opt)^2 + h4 * (P - P_opt)^2
     """
     h_vals = h_func_constrained(data.temp, data.precp, T_opt, P_opt, h2, h4)
     j_vals = j_func(data.country_idx, data.time, j0, j1, j2)
     k_vals = k_func(data.year_idx, k)
 
-    return g_values * h_vals + j_vals + k_vals
+    if model_variant == "growth":
+        return g_values * h_vals + j_vals + k_vals
+    else:  # "level"
+        h_vals_lag = h_func_constrained(data.temp_lag, data.precp_lag, T_opt, P_opt, h2, h4)
+        return g_values * h_vals - g_values_lag * h_vals_lag + j_vals + k_vals
 
 
 def objective_constrained(
     params: np.ndarray,
     GDP0: float,
     data: FittingData,
+    model_variant: str,
 ) -> float:
     """Objective function for constrained 3-parameter optimization.
 
@@ -546,6 +613,7 @@ def objective_constrained(
         params: [alpha, T_opt, P_opt]
         GDP0: Fixed reference GDP
         data: FittingData object
+        model_variant: "growth" or "level"
 
     Returns:
         Sum of squared residuals
@@ -557,10 +625,18 @@ def objective_constrained(
         return 1e20
 
     g_values = g_func(data.pcGDP, GDP0, alpha)
-    h2, h4, j0, j1, j2, k = solve_constrained_subproblem(data, g_values, T_opt, P_opt)
+
+    # Compute lagged g values for "level" model
+    g_values_lag = None
+    if model_variant == "level":
+        g_values_lag = g_func(data.pcGDP_lag, GDP0, alpha)
+
+    h2, h4, j0, j1, j2, k = solve_constrained_subproblem(
+        data, g_values, T_opt, P_opt, model_variant, g_values_lag
+    )
 
     pred = compute_constrained_predictions(
-        data, g_values, T_opt, P_opt, h2, h4, j0, j1, j2, k
+        data, g_values, T_opt, P_opt, h2, h4, j0, j1, j2, k, model_variant, g_values_lag
     )
     residuals = data.growth_pcGDP - pred
 
@@ -569,6 +645,7 @@ def objective_constrained(
 
 def fit_model_constrained(
     data: FittingData,
+    model_variant: str,
     verbose: bool,
 ) -> FitResult:
     """Fit model with h(T*, P*) = 0 constraint.
@@ -580,6 +657,7 @@ def fit_model_constrained(
 
     Args:
         data: FittingData object
+        model_variant: "growth" or "level"
         verbose: Print progress
 
     Returns:
@@ -591,9 +669,16 @@ def fit_model_constrained(
     T_min, T_max = data.temp.min(), data.temp.max()
     P_min, P_max = data.precp.min(), data.precp.max()
 
+    # Model variant descriptions
+    variant_desc = {
+        "growth": "g[t]*h[t] + j + k",
+        "level": "g[t]*h[t] - g[t-1]*h[t-1] + j + k",
+    }
+
     if verbose:
         print(f"Fitting constrained model...")
-        print(f"  Model: h(T, P) = h2*(T - T*)^2 + h4*(P - P*)^2")
+        print(f"  Model variant: {model_variant} [{variant_desc[model_variant]}]")
+        print(f"  Constraint: h(T, P) = h2*(T - T*)^2 + h4*(P - P*)^2")
         print(f"  N={data.n_obs}, countries={data.n_countries}, years={data.n_years}")
         print(f"  GDP0 (fixed) = {GDP0:.2f} (pop-weighted mean GDP, {data.gdp0_reference_years[0]}-{data.gdp0_reference_years[1]})")
         print(f"  T* bounds: [{T_min:.1f}, {T_max:.1f}]°C")
@@ -607,7 +692,7 @@ def fit_model_constrained(
     eval_history = []
 
     def tracked_objective(params):
-        obj = objective_constrained(params, GDP0, data)
+        obj = objective_constrained(params, GDP0, data, model_variant)
         eval_history.append((params.copy(), obj))
         if verbose and len(eval_history) % 1 == 0:
             print(f"    Iteration {len(eval_history)}: "
@@ -640,7 +725,15 @@ def fit_model_constrained(
 
     # Get final parameters
     g_values = g_func(data.pcGDP, GDP0, alpha)
-    h2, h4, j0, j1, j2, k = solve_constrained_subproblem(data, g_values, T_opt, P_opt)
+
+    # Compute lagged g values for "level" model
+    g_values_lag = None
+    if model_variant == "level":
+        g_values_lag = g_func(data.pcGDP_lag, GDP0, alpha)
+
+    h2, h4, j0, j1, j2, k = solve_constrained_subproblem(
+        data, g_values, T_opt, P_opt, model_variant, g_values_lag
+    )
 
     # Convert to unconstrained form for ModelParams
     h0, h1, h2_out, h3, h4_out = constrained_to_unconstrained_h(T_opt, P_opt, h2, h4)
@@ -653,7 +746,7 @@ def fit_model_constrained(
 
     # Compute predictions and residuals
     predictions = compute_constrained_predictions(
-        data, g_values, T_opt, P_opt, h2, h4, j0, j1, j2, k
+        data, g_values, T_opt, P_opt, h2, h4, j0, j1, j2, k, model_variant, g_values_lag
     )
     residuals = data.growth_pcGDP - predictions
 
@@ -702,7 +795,7 @@ def fit_model_constrained(
         n_iterations=len(eval_history),
         converged=converged,
         objective_history=objective_history,
-        model_variant="base",  # Constrained only for base model
+        model_variant=model_variant,
         constrained=True,
         T_opt=T_opt,
         P_opt=P_opt,
@@ -720,19 +813,26 @@ def compute_standard_errors(
     log-likelihood, then inverts to get the covariance matrix.
 
     GDP0 is treated as a known constant (not estimated), so it is excluded
-    from the Hessian calculation. For non-base variants, h0 is also excluded
-    (it's absorbed into j0).
+    from the Hessian calculation.
     """
-    param_vec = pack_params_for_hessian(params, data.n_countries, data.n_years, model_variant)
+    param_vec = pack_params_for_hessian(params, data.n_countries, data.n_years)
     GDP0 = params.GDP0
 
     def neg_log_likelihood(p):
         h_params, j0, j1, j2, k = unpack_params_for_hessian(
-            p, data.n_countries, data.n_years, model_variant
+            p, data.n_countries, data.n_years
         )
         alpha = p[0]
         g_values = g_func(data.pcGDP, GDP0, alpha)
-        pred = compute_predictions(data, g_values, h_params, j0, j1, j2, k, model_variant)
+
+        # Compute lagged g values for "level" model
+        g_values_lag = None
+        if model_variant == "level":
+            g_values_lag = g_func(data.pcGDP_lag, GDP0, alpha)
+
+        pred = compute_predictions(
+            data, g_values, h_params, j0, j1, j2, k, model_variant, g_values_lag
+        )
         residuals = data.growth_pcGDP - pred
         ss_res = np.sum(residuals**2)
         return data.n_obs / 2 * np.log(ss_res / data.n_obs)
@@ -741,7 +841,7 @@ def compute_standard_errors(
         hessian = compute_hessian(neg_log_likelihood, param_vec, eps=1e-5)
         cov = np.linalg.inv(hessian)
         se = np.sqrt(np.maximum(np.diag(cov), 0))
-        params = unpack_standard_errors(params, se, data.n_countries, data.n_years, model_variant)
+        params = unpack_standard_errors(params, se, data.n_countries, data.n_years)
     except (np.linalg.LinAlgError, ValueError) as e:
         print(f"Warning: Could not compute standard errors: {e}")
 
@@ -752,20 +852,14 @@ def pack_params_for_hessian(
     params: ModelParams,
     n_countries: int,
     n_years: int,
-    model_variant: str,
 ) -> np.ndarray:
     """Pack estimated parameters into a vector for Hessian computation.
 
-    Excludes GDP0. For non-base variants, h0 is also excluded (absorbed into j0).
+    Excludes GDP0 (fixed constant).
     """
-    if model_variant == "base":
-        h_part = [params.h0, params.h1, params.h2, params.h3, params.h4]
-    else:
-        h_part = [params.h1, params.h2, params.h3, params.h4]
-
     return np.concatenate([
         [params.alpha],
-        h_part,
+        [params.h0, params.h1, params.h2, params.h3, params.h4],
         params.j0[1:],  # Skip j0[0] (reference country)
         params.j1[1:],  # Skip j1[0]
         params.j2[1:],  # Skip j2[0]
@@ -777,20 +871,15 @@ def unpack_params_for_hessian(
     vec: np.ndarray,
     n_countries: int,
     n_years: int,
-    model_variant: str,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Unpack parameter vector for computing predictions.
 
-    Returns: h_params (always length 5), j0, j1, j2, k
+    Returns: h_params (length 5), j0, j1, j2, k
     """
     idx = 1  # Skip alpha (index 0)
 
-    if model_variant == "base":
-        h_params = vec[idx:idx + 5]
-        idx += 5
-    else:
-        h_params = np.concatenate([[0.0], vec[idx:idx + 4]])
-        idx += 4
+    h_params = vec[idx:idx + 5]
+    idx += 5
 
     n_j = n_countries - 1
 
@@ -813,23 +902,17 @@ def unpack_standard_errors(
     se: np.ndarray,
     n_countries: int,
     n_years: int,
-    model_variant: str,
 ) -> ModelParams:
     """Add standard errors to ModelParams.
 
     GDP0 has no standard error since it is a fixed known value.
-    For non-base variants, h0 SE is None (h0 is not estimated).
     """
     idx = 0
 
     params.se_GDP0 = None
     params.se_alpha = se[idx]; idx += 1
 
-    if model_variant == "base":
-        params.se_h0 = se[idx]; idx += 1
-    else:
-        params.se_h0 = None  # h0 absorbed into j0
-
+    params.se_h0 = se[idx]; idx += 1
     params.se_h1 = se[idx]; idx += 1
     params.se_h2 = se[idx]; idx += 1
     params.se_h3 = se[idx]; idx += 1
