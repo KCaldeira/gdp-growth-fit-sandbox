@@ -288,6 +288,7 @@ def fit_model(
     data: FittingData,
     model_variant: str,
     verbose: bool,
+    compute_se: bool,
 ) -> FitResult:
     """Fit the full model by optimizing alpha with linear subproblem solved exactly.
 
@@ -299,8 +300,9 @@ def fit_model(
 
     Args:
         data: FittingData object
-        model_variant: One of "base", "g_scales_hj", or "g_scales_all"
+        model_variant: "growth" or "level"
         verbose: Print progress
+        compute_se: If True, compute standard errors via numerical Hessian (slow)
 
     Returns:
         FitResult object
@@ -405,10 +407,11 @@ def fit_model(
         print(f"  RMSE = {rmse:.6f}")
         print(f"  AIC = {aic:.1f}, BIC = {bic:.1f}")
 
-    # Compute standard errors
-    if verbose:
-        print(f"\nComputing standard errors via Hessian (this may take a while)...")
-    params = compute_standard_errors(data, params, model_variant)
+    # Compute standard errors (optional, expensive)
+    if compute_se:
+        if verbose:
+            print(f"\nComputing standard errors via Hessian (this may take a while)...")
+        params = compute_standard_errors(data, params, model_variant)
 
     # Compute mean-centered parameters (alternative parameterization)
     compute_mean_centered_params(params, data.n_years)

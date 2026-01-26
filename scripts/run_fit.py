@@ -39,6 +39,11 @@ def main():
         action="store_true",
         help="Suppress progress output"
     )
+    parser.add_argument(
+        "--compute-se",
+        action="store_true",
+        help="Compute standard errors via numerical Hessian (slow, off by default)"
+    )
 
     args = parser.parse_args()
 
@@ -57,6 +62,7 @@ def main():
         data,
         model_variant=args.model_variant,
         verbose=not args.quiet,
+        compute_se=args.compute_se,
     )
 
     # Save outputs

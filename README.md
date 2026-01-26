@@ -5,30 +5,37 @@ A project for fitting non-linear models relating economic growth to GDP levels a
 ## Current Status
 
 The project now supports:
-- **Three model variants** with different assumptions about how GDP scaling affects components
+- **Two model variants**: "growth" (standard) and "level" (differenced climate impacts)
 - **Cluster bootstrap uncertainty analysis** (resampling countries with replacement)
 - **Monte Carlo-based confidence intervals** that don't assume normality of errors
-- **Hessian-based standard errors** (assuming normality) for comparison
+- **Optional Hessian-based standard errors** (assuming normality, off by default)
 
 ## Model Specification
 
-### Base Model (default)
+### Growth Model (default)
 
 ```
-growth_pcGDP(i,t) = g(pcGDP[i,t]) * h(T[i,t], P[i,t]) + j(i,t) + k(t)
+dy[t] = g(GDP[t]) * h(T[t], P[t]) + j(i,t) + k(t)
 ```
 
-### Alternative Model Variants
+Standard growth model where climate effect scales with GDP.
 
-Two alternative specifications are available via the `--model-variant` flag:
+### Level Model
+
+```
+dy[t] = g(GDP[t])*h(T[t],P[t]) - g(GDP[t-1])*h(T[t-1],P[t-1]) + j(i,t) + k(t)
+```
+
+Level model that fits the *difference* of climate impacts between consecutive years. This model requires lagged data (first observation per country is dropped).
+
+### Model Variants Summary
 
 | Variant | Equation | Description |
 |---------|----------|-------------|
-| `base` | `g*h + j + k` | GDP scaling applies only to climate response |
-| `g_scales_hj` | `g*(h + j) + k` | GDP scaling applies to climate + country trends |
-| `g_scales_all` | `g*(h + j + k)` | GDP scaling applies to everything |
+| `growth` | `g[t]*h[t] + j + k` | Standard growth model (default) |
+| `level` | `g[t]*h[t] - g[t-1]*h[t-1] + j + k` | Differenced climate impacts |
 
-For `g_scales_hj` and `g_scales_all`, h0 is absorbed into j0 (4 h parameters instead of 5).
+Both variants estimate 5 h parameters (h0, h1, h2, h3, h4).
 
 ### Component Functions
 
@@ -43,7 +50,7 @@ g(GDP) = (GDP / GDP0)^(-alpha)
 ```
 h(T, P) = h0 + h1*T + h2*T^2 + h3*P + h4*P^2
 ```
-Parameters: `h0`, `h1`, `h2`, `h3`, `h4` (h0 omitted for non-base variants)
+Parameters: `h0`, `h1`, `h2`, `h3`, `h4`
 
 **j(i, t)** - Country-specific time trends:
 ```
@@ -87,12 +94,16 @@ The cluster bootstrap resamples **countries with replacement**, preserving withi
 - **P\*** = -h3/(2×h4): Optimal log-precipitation
 
 ```bash
-python run_bootstrap.py --n-bootstrap 1000 --model-variant base
+python run_bootstrap.py --n-bootstrap 1000 --model-variant growth
 ```
 
-### Hessian-Based Standard Errors
+### Hessian-Based Standard Errors (Optional)
 
-Also computed automatically via numerical Hessian of the negative log-likelihood. These assume Gaussian errors but account for correlations between all parameters.
+Can be computed via numerical Hessian of the negative log-likelihood using the `--compute-se` flag. These assume Gaussian errors but account for correlations between all parameters. Disabled by default because it's computationally expensive and can fail for complex models.
+
+```bash
+python scripts/run_fit.py --model-variant growth --compute-se
+```
 
 ## Installation
 
@@ -106,20 +117,33 @@ pip install -r requirements.txt
 
 ## Usage
 
+### Basic Model Fitting
+
+```bash
+# Fit growth model (default)
+python scripts/run_fit.py
+
+# Fit level model (differenced climate impacts)
+python scripts/run_fit.py --model-variant level
+
+# With Hessian-based standard errors (slow)
+python scripts/run_fit.py --model-variant growth --compute-se
+```
+
 ### Bootstrap Uncertainty Analysis
 
 ```bash
-# Run with defaults (1000 bootstrap iterations, base model)
+# Run with defaults (1000 bootstrap iterations, growth model)
 python run_bootstrap.py
 
 # Specify model variant and iterations
-python run_bootstrap.py --model-variant g_scales_hj --n-bootstrap 500
+python run_bootstrap.py --model-variant level --n-bootstrap 500
 
 # Full options
 python run_bootstrap.py \
   --n-bootstrap 1000 \
   --seed 42 \
-  --model-variant base \
+  --model-variant growth \
   --output-dir ./data/output/my_analysis \
   --data-file data/input/df_base_withPop.csv
 ```
@@ -161,11 +185,22 @@ Output: `gdp_temperature_curvature.png` saved to the bootstrap directory.
 |--------|---------|-------------|
 | `--n-bootstrap` | 1000 | Number of bootstrap iterations |
 | `--seed` | 42 | Random seed for reproducibility |
-| `--model-variant` | base | Model variant: base, g_scales_hj, g_scales_all |
+| `--model-variant` | growth | Model variant: `growth` or `level` |
 | `--output-dir` | auto | Output directory (default: ./data/output/bootstrap_{timestamp}) |
 | `--data-file` | data/input/df_base_withPop.csv | Input data file |
 | `--from-file` | none | Compute stats from existing file (CSV or XLSX, skips bootstrap) |
 | `--constrained` | false | Use constrained model with h(T\*, P\*) = 0 |
+| `--compute-se` | false | Compute Hessian-based standard errors (slow) |
+
+### Command Line Options (run_fit.py)
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--input`, `-i` | data/input/df_base_withPop.csv | Input data file |
+| `--output`, `-o` | auto | Output directory |
+| `--model-variant`, `-m` | growth | Model variant: `growth` or `level` |
+| `--compute-se` | false | Compute Hessian-based standard errors (slow) |
+| `--quiet`, `-q` | false | Suppress progress output |
 
 ## Output Files
 
@@ -176,7 +211,7 @@ The bootstrap now produces both point estimate outputs and bootstrap-specific ou
 ```
 data/output/bootstrap_{timestamp}/
 ├── # Point estimate outputs (same as run_fit.py)
-├── global_params.json               # GDP0, alpha, h0-h4 with Hessian SEs
+├── global_params.json               # GDP0, alpha, h0-h4 (with SEs if --compute-se)
 ├── country_params.xlsx              # j0, j1, j2 (Sheet 1: original, Sheet 2: mean_centered)
 ├── year_effects.xlsx                # k[t] (Sheet 1: original, Sheet 2: mean_centered)
 ├── summary.json/txt                 # Fit statistics (R², RMSE, AIC, BIC)
@@ -211,7 +246,7 @@ data/output/bootstrap_{timestamp}/
 
 ```
 data/output/{timestamp}/
-├── global_params.json           # GDP0, alpha, h0-h4 with Hessian SEs
+├── global_params.json           # GDP0, alpha, h0-h4 (with SEs if --compute-se)
 ├── country_params.xlsx          # j0, j1, j2 (Sheet 1: original, Sheet 2: mean_centered)
 ├── year_effects.xlsx            # k[t] (Sheet 1: original, Sheet 2: mean_centered)
 ├── summary.json/txt             # Fit statistics (R², RMSE, AIC, BIC)

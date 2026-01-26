@@ -752,8 +752,9 @@ def main():
     parser.add_argument("--constrained", action="store_true",
                         help="Use constrained model with h(T*, P*) = 0. "
                              "This normalizes the climate response to pass through "
-                             "zero at optimal temperature and precipitation. "
-                             "Only available for base model variant.")
+                             "zero at optimal temperature and precipitation.")
+    parser.add_argument("--compute-se", action="store_true",
+                        help="Compute standard errors via numerical Hessian (slow, off by default)")
     parser.add_argument("--from-file", "--from-csv", type=str, default=None,
                         dest="from_file",
                         help="Compute statistics from existing bootstrap file "
@@ -807,7 +808,10 @@ def main():
         T_opt_point = fit_result.T_opt
         P_opt_point = fit_result.P_opt
     else:
-        fit_result = fit_model(data, model_variant=args.model_variant, verbose=True)
+        fit_result = fit_model(
+            data, model_variant=args.model_variant, verbose=True,
+            compute_se=args.compute_se,
+        )
         T_opt_point = None
         P_opt_point = None
 
